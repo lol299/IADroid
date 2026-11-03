@@ -1,6 +1,37 @@
-# Exclure tous les dossiers __pycache__ quel que soit leur emplacement
-**/__pycache__/
+# Python bytecode
 __pycache__/
-
-# Exclure également les fichiers de bytecode compilés
 *.py[cod]
+*$py.class
+
+# Environnements virtuels
+.venv/
+venv/
+env/
+ENV/
+
+# Fichiers de modèles lourds (ne jamais commiter sur Git !)
+*.gguf
+*.bin
+*.safetensors
+models/
+*.pt
+*.onnx
+
+# Données locales et logs IADroid
+*.log
+history.txt
+active_preset.txt
+.iadroid/
+
+# Fichiers de compilation CMake & Ninja locaux
+build/
+bin/
+CMakeFiles/
+CMakeCache.txt
+*.ninja
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+*.swp
+*~

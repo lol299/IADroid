@@ -230,6 +230,17 @@ Par défaut, le noyau Android et le gouverneur de devfreq réduisent la fréquen
 
 ---
 
+## 👏 Remerciements & Projets Amont
+
+IADroid s'appuie avec gratitude sur les travaux exceptionnels de la communauté open-source :
+* **[llama.cpp](https://github.com/ggerganov/llama.cpp)** (par Georgi Gerganov & contributeurs - Licence MIT) : Moteur d'inférence LLM haute performance ARM64 et backend Vulkan.
+* **[Mesa 3D / Freedreno Turnip](https://gitlab.freedesktop.org/mesa/mesa)** (Licence MIT) : Pilote Vulkan open-source pour puces Qualcomm Adreno.
+* **[Termux](https://github.com/termux/termux-app)** (Licence GPLv3) : Environnement terminal et écosystème Linux pour Android.
+* **[Rich](https://github.com/Textualize/rich)** & **[Prompt Toolkit](https://github.com/prompt-toolkit/python-prompt-toolkit)** (Licences MIT & BSD) : Rendu visuel élégant dans le terminal et moteur REPL interactif.
+
+---
+
 ## 📄 Licence
 
-Ce projet est sous licence **MIT**. Vous êtes libre de l'utiliser, le modifier et le distribuer.
+Ce projet est sous licence **MIT**. Voir le fichier [LICENSE](LICENSE) pour plus de détails.
+Vous êtes libre d'utiliser, modifier et distribuer ce logiciel.
