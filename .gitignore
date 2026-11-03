@@ -1,0 +1,6 @@
+# Exclure tous les dossiers __pycache__ quel que soit leur emplacement
+**/__pycache__/
+__pycache__/
+
+# Exclure également les fichiers de bytecode compilés
+*.py[cod]
