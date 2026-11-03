@@ -2,27 +2,41 @@
 
 <div align="center">
 
-```text
-       ██                  ██        
-     ██████████████████████████      IADroid - Assistant IA Local pour Android
-     ████  ██████████████  ████      ─────────────────────────────────────────
-     ██████████████████████████      • Moteur : llama.cpp ARM64 (Vulkan 1.4)
-                                     • GPU : Qualcomm Adreno (Turnip) / ARM Mali
-   ██  ██████████████████████  ██    • RAM : Unifiée LPDDR (mmap + Flash Attention)
-   ██  ██████████████████████  ██    • Interface : CLI style Claude Code / Antigravity
-   ██  ██████████████████████  ██    
-       ██████████████████████        
-           ██████      ██████        
-           ██████      ██████        
-```
+<img src="assets/logo.svg" width="160" alt="IADroid Logo" />
 
-[![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20Termux-3DDC84?logo=android&logoColor=white)](https://f-droid.org/packages/com.termux/)
-[![Engine](https://img.shields.io/badge/Engine-llama.cpp%20ARM64-blue)](https://github.com/ggerganov/llama.cpp)
-[![GPU](https://img.shields.io/badge/GPU-Vulkan%201.4%20%28Turnip%20%2F%20Mali%29-red?logo=vulkan&logoColor=white)](https://vulkan.org)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-yellow?logo=python&logoColor=white)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+# IADroid 🤖⚡
+
+### Assistant IA Local & Performant pour Android avec Termux
+*Moteur natif `llama.cpp` ARM64 • Accélération GPU Vulkan 1.4 (Turnip Adreno / Mali) • Mémoire Unifiée LPDDR*
+
+[![Vibe Coding](https://img.shields.io/badge/Built%20with-Vibe%20Coding%20%E2%9A%A1-ff007f?style=for-the-badge&logo=openai&logoColor=white)](https://en.wikipedia.org/wiki/Vibe_coding)
+[![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20Termux-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://f-droid.org/packages/com.termux/)
+[![Engine](https://img.shields.io/badge/Engine-llama.cpp%20ARM64-blue?style=for-the-badge)](https://github.com/ggerganov/llama.cpp)
+[![GPU](https://img.shields.io/badge/GPU-Vulkan%201.4%20(Turnip)-red?style=for-the-badge&logo=vulkan&logoColor=white)](https://vulkan.org)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-yellow?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](LICENSE)
 
 </div>
+
+> ⚡ **Projet propulsé par le Vibe Coding :** Ce projet a été entièrement conçu, architecturé et programmé en mode **Vibe Coding** assisté par Intelligence Artificielle. L'objectif : créer un environnement CLI élégant inspiré de *Claude Code* et *Antigravity*, tout en exploitant au maximum le silicium de votre smartphone (Qualcomm Adreno 750 / Snapdragon 8 Gen 3) via Vulkan 1.4, **100% hors-ligne et sans aucun abonnement**.
+
+<details>
+<summary>👾 <i>Afficher la mascotte Bugdroid Pixel-Art du CLI</i></summary>
+
+```text
+       ██                  ██
+     ██████████████████████████
+     ████  ██████████████  ████
+     ██████████████████████████
+
+   ██  ██████████████████████  ██
+   ██  ██████████████████████  ██
+   ██  ██████████████████████  ██
+       ██████████████████████
+           ██████      ██████
+           ██████      ██████
+```
+</details>
 
 **IADroid** est un environnement d'exécution et un CLI conversationnel moderne inspiré de *Claude Code* et *Antigravity CLI (agy)*, conçu pour exécuter des modèles de langage (LLM) et multimodaux (Vision) directement et **100% hors-ligne sur smartphone Android via Termux**, avec accélération matérielle native **GPU Vulkan** et **CPU ARM64**.
 
