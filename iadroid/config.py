@@ -41,6 +41,33 @@ REASONING_TOKEN_BUDGETS = {
     "xhigh": 4096
 }
 
+def get_ram_info() -> tuple:
+    """
+    Retourne (used_gb, total_gb, percent, free_gb).
+    Lit /proc/meminfo sous Android Termux / Linux avec fallback psutil.
+    """
+    try:
+        meminfo = {}
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                parts = line.split(":")
+                if len(parts) == 2:
+                    meminfo[parts[0].strip()] = int(parts[1].strip().split()[0])
+        total_kb = meminfo.get("MemTotal", 0)
+        avail_kb = meminfo.get("MemAvailable", meminfo.get("MemFree", 0) + meminfo.get("Buffers", 0) + meminfo.get("Cached", 0))
+        used_kb = max(0, total_kb - avail_kb)
+        if total_kb > 0:
+            return (used_kb / 1048576, total_kb / 1048576, (used_kb / total_kb) * 100, avail_kb / 1048576)
+    except Exception:
+        pass
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        return (vm.used / (1024**3), vm.total / (1024**3), vm.percent, vm.available / (1024**3))
+    except Exception:
+        pass
+    return (0.0, 0.0, 0.0, 0.0)
+
 def ensure_directories():
     """Crée l'arborescence des dossiers et assure la liaison du pilote GPU Vulkan sous Termux."""
     for d in (PRESETS_DIR, MODELS_DIR, BIN_DIR, LOGS_DIR):
