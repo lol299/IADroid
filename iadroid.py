@@ -52,5 +52,21 @@ def main():
     cli = IADroidCLI()
     cli.start()
 
+def global_excepthook(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    from iadroid.crash_handler import handle_crash
+    handle_crash(exc_value)
+
+sys.excepthook = global_excepthook
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
+    except Exception as e:
+        from iadroid.crash_handler import handle_crash
+        handle_crash(e)
+        sys.exit(1)

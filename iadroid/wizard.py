@@ -46,6 +46,11 @@ class PresetWizard:
             console.print(f"  [dim]{help_text}[/dim]")
         return Confirm.ask(f"  [cyan]{label}[/cyan]", default=default)
 
+    def run(self, preset_name: Optional[str] = None, edit_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Alias universel pour lancer l'assistant (supporte run(), run(name), run(edit_name=name))."""
+        target = preset_name or edit_name
+        return self.run_wizard(target)
+
     def run_wizard(self, preset_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Lance l'assistant complet.

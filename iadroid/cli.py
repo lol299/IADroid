@@ -33,6 +33,7 @@ from .preset_manager import PresetManager, is_llama_running, stop_llama_processe
 from .wizard import PresetWizard
 from .builder import LlamaBuilder
 from .server import LlamaServer
+from .crash_handler import handle_crash
 
 console = Console()
 
@@ -601,7 +602,7 @@ class IADroidCLI:
 
         # /create-preset
         elif cmd == "/create-preset":
-            self.wizard.run()
+            self.wizard.run_wizard()
             return True
 
         # /profil_config <nom>
@@ -610,7 +611,7 @@ class IADroidCLI:
             if not target:
                 console.print("[yellow]Veuillez spécifier le profil à éditer : /profil_config <nom>[/yellow]")
             else:
-                self.wizard.run(edit_name=target)
+                self.wizard.run_wizard(target)
             return True
 
         # /profil_config_env <nom>
@@ -763,7 +764,8 @@ class IADroidCLI:
             self.last_speed = "--"
 
             console.print(f"\n[bold {ANDROID_GREEN}]⚡ Chargement du profil '{target}' avec llama-server...[/bold {ANDROID_GREEN}]")
-            success = self.server.start(preset)
+            with self.live_bar():
+                success = self.server.start(preset)
             if success:
                 console.print(f"[bold {ANDROID_GREEN}]✓ Modèle '{target}' prêt ! Posez votre question directement ci-dessous au prompt >[/bold {ANDROID_GREEN}]\n")
             return True
@@ -776,7 +778,8 @@ class IADroidCLI:
                 return True
             p_name = preset.get("name", "inconnu")
             console.print(f"\n[bold {ANDROID_GREEN}]⚡ Démarrage du profil '{p_name}' avec llama-server...[/bold {ANDROID_GREEN}]")
-            success = self.server.start(preset)
+            with self.live_bar():
+                success = self.server.start(preset)
             if success:
                 console.print(f"[bold {ANDROID_GREEN}]✓ Modèle '{p_name}' chargé et prêt en mémoire ![/bold {ANDROID_GREEN}]")
                 console.print("[dim]L'interface IADroid reste active. Tapez directement votre message au prompt > ci-dessous.[/dim]\n")
@@ -873,7 +876,8 @@ class IADroidCLI:
         # Si le serveur n'est pas encore prêt, le démarrer automatiquement
         if not self.server.is_ready():
             console.print("[cyan]⚡ Démarrage automatique de llama-server en mémoire...[/cyan]")
-            success = self.server.start(preset)
+            with self.live_bar():
+                success = self.server.start(preset)
             if not success:
                 return
 
@@ -958,36 +962,37 @@ class IADroidCLI:
                 spinner.stop()
             parser.feed(token)
 
-        try:
-            full_reply, elapsed, gen_tokens = self.server.stream_chat(
-                messages=messages,
-                sampling=preset.get("sampling", {}),
-                on_token=on_raw_token
-            )
-            parser.finish()
+        with self.live_bar():
+            try:
+                full_reply, elapsed, gen_tokens = self.server.stream_chat(
+                    messages=messages,
+                    sampling=preset.get("sampling", {}),
+                    on_token=on_raw_token
+                )
+                parser.finish()
 
-            clean_reply = "".join(parser.full_response_text).strip()
-            if not clean_reply and full_reply:
-                clean_reply = full_reply.strip()
+                clean_reply = "".join(parser.full_response_text).strip()
+                if not clean_reply and full_reply:
+                    clean_reply = full_reply.strip()
 
-            self.conversation_history.append(("user", user_prompt))
-            self.conversation_history.append(("assistant", clean_reply))
+                self.conversation_history.append(("user", user_prompt))
+                self.conversation_history.append(("assistant", clean_reply))
 
-            user_tokens = int(len(user_prompt.split()) * 1.3)
-            tokens_count = max(1, gen_tokens if gen_tokens > 0 else int(len(clean_reply.split()) * 1.3))
-            self.context_tokens_used += user_tokens + tokens_count
+                user_tokens = int(len(user_prompt.split()) * 1.3)
+                tokens_count = max(1, gen_tokens if gen_tokens > 0 else int(len(clean_reply.split()) * 1.3))
+                self.context_tokens_used += user_tokens + tokens_count
 
-            if elapsed > 0.05:
-                self.last_speed = str(round(tokens_count / elapsed, 1))
+                if elapsed > 0.05:
+                    self.last_speed = str(round(tokens_count / elapsed, 1))
 
-            console.print()
+                console.print()
 
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Génération interrompue par l'utilisateur (Ctrl+C).[/yellow]\n")
-        except Exception as e:
-            console.print(f"\n[red]Erreur lors de la génération : {e}[/red]\n")
-        finally:
-            spinner.stop()
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Génération interrompue par l'utilisateur (Ctrl+C).[/yellow]\n")
+            except Exception as e:
+                console.print(f"\n[red]Erreur lors de la génération : {e}[/red]\n")
+            finally:
+                spinner.stop()
 
     def run_raw_llama_cli(self):
         """Lance llama-cli en mode brut interactif plein écran (expert/debug)."""
@@ -1038,8 +1043,7 @@ class IADroidCLI:
                         bottom_toolbar=self.get_bottom_toolbar,
                         refresh_interval=1.0
                     )
-                    with self.live_bar():
-                        should_continue = self.handle_command(user_input)
+                    should_continue = self.handle_command(user_input)
                     if not should_continue:
                         break
                 except KeyboardInterrupt:
@@ -1047,5 +1051,14 @@ class IADroidCLI:
                 except EOFError:
                     console.print("\n[yellow]Au revoir ![/yellow]")
                     break
+                except Exception as e:
+                    # Enregistrement automatique du crash dans les Téléchargements et affichage propre
+                    preset = self.manager.get_active_preset() or {}
+                    ctx = {
+                        "preset": preset.get("name", "Inconnu"),
+                        "device": preset.get("hardware", {}).get("device", "Inconnu"),
+                        "server_status": self.server.get_status()
+                    }
+                    handle_crash(e, extra_context=ctx)
         finally:
             self.server.stop()
