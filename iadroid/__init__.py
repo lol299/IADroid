@@ -2,5 +2,7 @@
 IADroid - Assistant IA Local pour Android avec Termux
 """
 
-__version__ = "0.1.1"
+from .version import __version__
+
 __author__ = "IADroid Team"
+__all__ = ["__version__"]

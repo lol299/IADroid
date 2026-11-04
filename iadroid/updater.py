@@ -21,7 +21,7 @@ from rich.table import Table
 from rich.prompt import Confirm
 
 from .config import IADROID_HOME, ANDROID_GREEN, CYAN, YELLOW
-from . import __version__
+from .version import __version__
 
 console = Console()
 

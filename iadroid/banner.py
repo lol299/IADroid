@@ -8,7 +8,7 @@ from rich.panel import Panel
 from rich.columns import Columns
 from rich.text import Text
 from .config import ANDROID_GREEN, CYAN, YELLOW
-from . import __version__
+from .version import __version__
 
 console = Console()
 

@@ -23,6 +23,10 @@ def main():
         if arg in ("--help", "-h"):
             print_help_table()
             return
+        elif arg in ("--version", "-v"):
+            from iadroid.version import __version__
+            print(f"IADroid v{__version__}")
+            return
         elif arg in ("--update", "-u"):
             from iadroid.updater import run_update_interactive
             run_update_interactive()
