@@ -5,6 +5,7 @@ Style Claude Code & Antigravity CLI (agy) avec barre de commandes et autocomplé
 
 import os
 import sys
+import time
 import shutil
 import subprocess
 from pathlib import Path
@@ -228,6 +229,20 @@ class IADroidCLI:
             auto_suggest=AutoSuggestFromHistory(),
             completer=IADroidCompleter(self.manager)
         )
+
+        # Ancrer la zone de saisie tout en bas de l'écran (style Claude Code)
+        # pour que le prompt > et la barre inférieure soient collés ensemble au bas du terminal
+        try:
+            from prompt_toolkit.layout.containers import VerticalAlign
+            from prompt_toolkit.filters import to_filter
+            root = self.session.layout.container
+            if hasattr(root, 'align'):
+                root.align = VerticalAlign.BOTTOM
+            cw = self.session.layout.current_window
+            if cw:
+                cw.dont_extend_height = to_filter(True)
+        except Exception:
+            pass
 
         # Style de l'invite de commande (Style Claude Code épuré, sans fond blanc disgracieux)
         self.style = Style.from_dict({
