@@ -95,11 +95,12 @@ iadroid
 Vous arrivez sur l'interface épurée avec la mascotte Bugdroid, la ligne de saisie minimaliste `> ` et la barre d'état dynamique :
 
 ```text
+                                                        ● high · /effort
 ────────────────────────────────────────────────────────────────────────
 > Bonjour ! Présente-toi brièvement.
-```
-```text
- ● Prêt | [████░░░░░░] 240/8192 (2.9%) | ⚡ 18.2 t/s | GPU | Profil: Qwen3.5_9b
+────────────────────────────────────────────────────────────────────────
+ ⚡ 18.2 t/s | 🧠 Ctx: 240/8192 (2.9%) [██░░░░░░] | ● Prêt (VRAM)
+ ❯❯ Profil: Qwen3.5_9b · GPU · Tapez /help pour l'aide
 ```
 
 ---
@@ -110,6 +111,9 @@ Vous arrivez sur l'interface épurée avec la mascotte Bugdroid, la ligne de sai
 | :--- | :--- | :--- |
 | **`/load`** | `/load <nom>` | Sélectionne un profil et le charge immédiatement en RAM pour converser. |
 | **`/stop`** | `/stop` *(ou `/kill`)* | Arrête tout processus `llama.cpp` actif et libère instantanément la RAM et la VRAM GPU. |
+| **`/effort`** | `/effort <level>` | Règle l'effort de réflexion (`minimal`, `low`, `medium`, `high`, `xhigh`, `off`). |
+| **`/think`** | `/think <on\|off>` | Active ou désactive rapidement le mode réflexion (Thinking). |
+| **`/update`** | `/update` | Vérifie et installe les mises à jour d'IADroid depuis GitHub. |
 | **`/create-preset`** | `/create-preset` | Assistant interactif pas à pas pour configurer un nouveau modèle GGUF. |
 | **`/profil_config`** | `/profil_config <nom>` | Ouvre l'assistant pré-rempli pour modifier un profil existant. |
 | **`/profil_config_env`** | `/profil_config_env <nom>` | Affiche la configuration JSON brute du profil avec coloration syntaxique. |

@@ -33,7 +33,7 @@ MASCOT_PIXEL_COMPACT = f"""[{ANDROID_GREEN}]
  ▀███████▀
  ██ ▀▀▀ ██[/{ANDROID_GREEN}]"""
 
-def display_welcome_banner(preset_data: dict = None):
+def display_welcome_banner(preset_data: dict = None, has_update: bool = False):
     """Affiche la mascotte Android et les informations du profil actif."""
     term_width = shutil.get_terminal_size().columns
     is_narrow = term_width < 70
@@ -63,9 +63,16 @@ def display_welcome_banner(preset_data: dict = None):
     info_text.append(f"{device_str}\n", style=device_style)
     info_text.append("• Contexte     : ", style="dim")
     info_text.append(f"{ctx_size} tokens\n", style="magenta")
+
+    if has_update:
+        info_text.append("• Mise à jour  : ", style="dim")
+        info_text.append("Disponible sur GitHub (/update)\n", style="bold yellow")
+
     info_text.append("─" * (min(38, term_width - 10)) + "\n", style="dim")
     info_text.append("Commandes rapides : ", style="dim")
     info_text.append("/help", style=f"bold {ANDROID_GREEN}")
+    info_text.append(" | ", style="dim")
+    info_text.append("/update", style="bold yellow")
     info_text.append(" | ", style="dim")
     info_text.append("/create-preset", style=f"bold {ANDROID_GREEN}")
 
@@ -95,9 +102,12 @@ def print_help_table():
     table.add_row("/profil_config_env", "<nom>", "Afficher le fichier brut de configuration du profil")
     table.add_row("/profil_Prompt_Systeme", "<nom>", "Afficher et modifier directement le prompt système du profil")
     table.add_row("/device", "<gpu|cpu>", "Basculer instantanément le profil actif entre GPU (Vulkan) et CPU")
+    table.add_row("/effort", "<level>", "Régler l'effort de réflexion (minimal|low|medium|high|xhigh|off)")
+    table.add_row("/think", "<on|off>", "Activer ou désactiver rapidement le mode réflexion (Thinking)")
     table.add_row("/presets", "", "Lister tous les profils enregistrés")
     table.add_row("/use", "<nom>", "Activer un profil spécifique")
     table.add_row("/reset", "", "Réinitialiser le contexte de la conversation en cours")
+    table.add_row("/update", "", "Vérifier et installer les mises à jour d'IADroid depuis GitHub")
     table.add_row("/check-gpu", "", "Diagnostic GPU Vulkan et liaison automatique du pilote Android")
     table.add_row("/boost-gpu", "", "Forcer la fréquence maximale du GPU (1000 MHz pour Adreno 750)")
     table.add_row("/cmake-thread-compile", "<2|4|6|8>", "Choisir le nombre de threads de compilation avec grille des risques")

@@ -32,6 +32,96 @@ from .server import LlamaServer
 
 console = Console()
 
+class ThinkStreamParser:
+    """Analyse les tokens en temps réel pour détecter et séparer les blocs <think> ... </think>."""
+    def __init__(self, on_think_start, on_think_token, on_think_end, on_response_start, on_response_token):
+        self.on_think_start = on_think_start
+        self.on_think_token = on_think_token
+        self.on_think_end = on_think_end
+        self.on_response_start = on_response_start
+        self.on_response_token = on_response_token
+
+        self.state = "INIT"  # INIT, THINKING, RESPONDING
+        self.buffer = ""
+        self.think_tokens_count = 0
+        self.response_tokens_count = 0
+        self.full_think_text = []
+        self.full_response_text = []
+
+    def feed(self, token: str):
+        if self.state == "INIT":
+            self.buffer += token
+            stripped = self.buffer.lstrip()
+            if "<think>" in stripped:
+                idx = self.buffer.find("<think>")
+                before = self.buffer[:idx]
+                if before.strip():
+                    self.on_response_start()
+                    self.on_response_token(before)
+                    self.full_response_text.append(before)
+                self.state = "THINKING"
+                self.on_think_start()
+                after = self.buffer[idx + 7:]
+                self.buffer = ""
+                if after:
+                    self.feed(after)
+                return
+            elif len(stripped) >= 8 and not "<think>".startswith(stripped[:min(len(stripped), 7)]):
+                # Ce n'est pas un bloc <think>, on commence la réponse
+                self.state = "RESPONDING"
+                self.on_response_start()
+                self.on_response_token(self.buffer)
+                self.full_response_text.append(self.buffer)
+                self.response_tokens_count += 1
+                self.buffer = ""
+                return
+
+        elif self.state == "THINKING":
+            self.buffer += token
+            if "</think>" in self.buffer:
+                idx = self.buffer.find("</think>")
+                think_chunk = self.buffer[:idx]
+                if think_chunk:
+                    self.on_think_token(think_chunk)
+                    self.full_think_text.append(think_chunk)
+                    self.think_tokens_count += 1
+                self.on_think_end(self.think_tokens_count)
+                self.state = "RESPONDING"
+                self.on_response_start()
+                after = self.buffer[idx + 8:].lstrip("\r\n")
+                self.buffer = ""
+                if after:
+                    self.on_response_token(after)
+                    self.full_response_text.append(after)
+                    self.response_tokens_count += 1
+                return
+            else:
+                if len(self.buffer) > 8:
+                    emit_len = len(self.buffer) - 8
+                    emit_part = self.buffer[:emit_len]
+                    self.buffer = self.buffer[emit_len:]
+                    self.on_think_token(emit_part)
+                    self.full_think_text.append(emit_part)
+                    self.think_tokens_count += 1
+
+        elif self.state == "RESPONDING":
+            self.on_response_token(token)
+            self.full_response_text.append(token)
+            self.response_tokens_count += 1
+
+    def finish(self):
+        if self.state == "INIT" and self.buffer:
+            self.on_response_start()
+            self.on_response_token(self.buffer)
+            self.full_response_text.append(self.buffer)
+            self.response_tokens_count += 1
+            self.buffer = ""
+        elif self.state == "THINKING" and self.buffer:
+            self.on_think_token(self.buffer)
+            self.full_think_text.append(self.buffer)
+            self.on_think_end(self.think_tokens_count)
+            self.buffer = ""
+
 class IADroidCompleter(Completer):
     """Autocomplétion intelligente pour les commandes slash et les noms de profils."""
     def __init__(self, manager: PresetManager):
@@ -45,6 +135,9 @@ class IADroidCompleter(Completer):
             "/profil_config_env",
             "/profil_Prompt_Systeme",
             "/device",
+            "/effort",
+            "/think",
+            "/update",
             "/presets",
             "/use",
             "/reset",
@@ -101,6 +194,22 @@ class IADroidCompleter(Completer):
                     yield Completion(dev, start_position=-len(sub_prefix))
             return
 
+        # Complétion pour /effort
+        if words[0] in ("/effort", "/reasoning"):
+            sub_prefix = words[1] if len(words) > 1 and not text.endswith(" ") else ""
+            for eff in ("minimal", "low", "medium", "high", "xhigh", "off"):
+                if eff.startswith(sub_prefix):
+                    yield Completion(eff, start_position=-len(sub_prefix))
+            return
+
+        # Complétion pour /think
+        if words[0] == "/think":
+            sub_prefix = words[1] if len(words) > 1 and not text.endswith(" ") else ""
+            for opt in ("on", "off"):
+                if opt.startswith(sub_prefix):
+                    yield Completion(opt, start_position=-len(sub_prefix))
+            return
+
 class IADroidCLI:
     def __init__(self):
         ensure_directories()
@@ -120,37 +229,80 @@ class IADroidCLI:
             completer=IADroidCompleter(self.manager)
         )
 
-        # Style de l'invite de commande (exactement comme le prompt minimaliste de Claude Code)
+        # Style de l'invite de commande (Style Claude Code épuré, sans fond blanc disgracieux)
         self.style = Style.from_dict({
             'prompt': '#3DDC84 bold',
-            'bottom-toolbar': 'bg:#1A1A1A #CCCCCC',
-            'bottom-toolbar.on': '#3DDC84 bold',
-            'bottom-toolbar.off': '#FFD32A bold',
+            'bottom-toolbar': 'noinherit default',
+            'bottom-toolbar.text': 'noinherit default',
         })
 
+    def get_prompt_message(self):
+        """
+        En-tête supérieur et barre de prompt style Claude Code (>):
+        Affiche le niveau d'effort à droite, une ligne horizontale séparatrice ─,
+        puis l'invite > en vert.
+        """
+        term_width = shutil.get_terminal_size().columns
+        width = max(10, min(term_width - 1, 100))
+
+        preset = self.manager.get_active_preset()
+        rs = preset.get("reasoning", {}) if preset else {}
+        effort = rs.get("effort", "medium") if rs.get("enabled", True) else "off"
+
+        if effort in ("high", "xhigh"):
+            effort_color = "#3DDC84"
+        elif effort in ("medium", "low", "minimal"):
+            effort_color = "#FFD32A"
+        else:
+            effort_color = "#777777"
+
+        tag = f"● {effort} · /effort"
+        pad = max(0, width - len(tag))
+
+        return HTML(
+            f'<style fg="#555555">{" " * pad}</style>'
+            f'<style fg="{effort_color}"><b>● {effort}</b></style>'
+            f'<style fg="#777777"> · /effort</style>\n'
+            f'<style fg="#555555">{"─" * width}</style>\n'
+            f'<style fg="#3DDC84"><b>&gt; </b></style>'
+        )
+
     def get_bottom_toolbar(self):
-        """Barre d'état inférieure sous la zone de saisie avec jauge de contexte et t/s."""
+        """
+        Barre d'état inférieure sous la zone de saisie style Claude Code :
+        - Ligne 1 : Ligne horizontale de séparation ─
+        - Ligne 2 : ⚡ vitesse | 🧠 tokens contexte (%) [jauge] | ● statut VRAM
+        - Ligne 3 : ❯❯ Profil actif · Matériel · /help pour commandes
+        Aucun fond blanc (arborescence sombre transparente et couleurs vives).
+        """
+        term_width = shutil.get_terminal_size().columns
+        width = max(10, min(term_width - 1, 100))
+        sep_line = "─" * width
+
         active_preset = self.manager.get_active_preset()
         if not active_preset:
-            return HTML(' <i>Aucun profil actif. Tapez /create-preset pour commencer.</i>')
+            return HTML(
+                f'<style fg="#555555">{sep_line}</style>\n'
+                f'<style fg="#FFD32A"> <i>Aucun profil actif. Tapez /create-preset pour commencer.</i></style>'
+            )
 
         p_name = active_preset.get("name", "Inconnu")
         hw = active_preset.get("hardware", {})
         dev = hw.get("device", "gpu").upper()
         ctx_total = active_preset.get("context", {}).get("ctx_size", 4096)
-        
+
         # Calcul de la jauge de progression du contexte
         used = self.context_tokens_used
         ratio = min(1.0, max(0.0, used / max(1, ctx_total)))
         pct = ratio * 100
-        
-        bar_width = 10
+
+        bar_width = 8
         filled_count = int(ratio * bar_width)
         empty_count = bar_width - filled_count
-        
+
         filled_bar = "█" * filled_count
         empty_bar = "░" * empty_count
-        
+
         # Statut réel en mémoire via llama-server
         server_status = self.server.get_status()
         if server_status == "ready":
@@ -160,18 +312,54 @@ class IADroidCLI:
         else:
             status_badge = '<style fg="#777777"><b>○ Arrêté (/run)</b></style>'
 
-        dev_tag = "on" if dev == "GPU" else "off"
         speed_str = f"{self.last_speed} t/s" if self.last_speed != "--" else "-- t/s"
+        dev_color = "#3DDC84" if dev == "GPU" else "#FFD32A"
 
-        return HTML(
-            f' {status_badge} | '
-            f'<style fg="#3DDC84"><b>[{filled_bar}</b></style>'
-            f'<style fg="#555555"><b>{empty_bar}]</b></style> '
-            f'<b>{used}/{ctx_total}</b> ({pct:.1f}%) | '
-            f'⚡ <b>{speed_str}</b> | '
-            f'<{dev_tag}>{dev}</{dev_tag}> | '
-            f'Profil: <b>{p_name}</b>'
-        )
+        # Ligne 1 : Bordure horizontale inférieure
+        line_border = f'<style fg="#555555">{sep_line}</style>'
+
+        if width < 60:
+            # Affichage compact pour petits écrans de smartphones Android
+            line_metrics = (
+                f' <style fg="#FFA500">⚡</style> <style fg="#00D8D6"><b>{speed_str}</b></style> '
+                f'<style fg="#555555">|</style> '
+                f'<style fg="#FF79C6">🧠</style> <style fg="#FFFFFF"><b>{used}/{ctx_total}</b></style> '
+                f'<style fg="#3DDC84">({pct:.0f}%)</style> '
+                f'<style fg="#555555">|</style> '
+                f'{status_badge}'
+            )
+            line_info = (
+                f' <style fg="#FFD32A"><b>❯❯</b></style> '
+                f'<style fg="#00D8D6"><b>{p_name}</b></style> '
+                f'<style fg="#555555">·</style> '
+                f'<style fg="{dev_color}"><b>{dev}</b></style> '
+                f'<style fg="#555555">·</style> '
+                f'<style fg="#888888">Tapez </style><style fg="#3DDC84"><b>/help</b></style>'
+            )
+        else:
+            # Affichage complet style Claude Code
+            line_metrics = (
+                f' <style fg="#FFA500">⚡</style> <style fg="#00D8D6"><b>{speed_str}</b></style> '
+                f'<style fg="#555555">|</style> '
+                f'<style fg="#FF79C6">🧠</style> <style fg="#CCCCCC">Ctx: </style>'
+                f'<style fg="#FFFFFF"><b>{used}/{ctx_total}</b></style> '
+                f'<style fg="#3DDC84"><b>({pct:.1f}%)</b></style> '
+                f'<style fg="#3DDC84">{filled_bar}</style><style fg="#444444">{empty_bar}</style> '
+                f'<style fg="#555555">|</style> '
+                f'{status_badge}'
+            )
+            line_info = (
+                f' <style fg="#FFD32A"><b>❯❯</b></style> '
+                f'<style fg="#888888">Profil: </style><style fg="#00D8D6"><b>{p_name}</b></style> '
+                f'<style fg="#555555">·</style> '
+                f'<style fg="{dev_color}"><b>{dev}</b></style> '
+                f'<style fg="#555555">·</style> '
+                f'<style fg="#888888">Tapez </style><style fg="#3DDC84"><b>/help</b></style>'
+                f'<style fg="#888888"> pour l\'aide · </style><style fg="#FFD32A"><b>/stop</b></style>'
+                f'<style fg="#888888"> pour libérer la VRAM</style>'
+            )
+
+        return HTML(f"{line_border}\n{line_metrics}\n{line_info}")
 
     def handle_command(self, user_input: str) -> bool:
         """Exécute une commande utilisateur. Retourne False pour quitter."""
@@ -244,6 +432,49 @@ class IADroidCLI:
                 if self.server.is_ready():
                     console.print(f"[cyan]Redémarrage du modèle en mode {arg.upper()}...[/cyan]")
                     self.server.start(self.manager.get_active_preset())
+            return True
+
+        # /effort <minimal|low|medium|high|xhigh|off>
+        elif cmd in ("/effort", "/reasoning"):
+            active_name = self.manager.get_active_preset_name()
+            if not active_name:
+                console.print("[yellow]Aucun profil actif.[/yellow]")
+            elif not arg:
+                preset = self.manager.get_active_preset()
+                rs = preset.get("reasoning", {}) if preset else {}
+                curr = rs.get("effort", "medium") if rs.get("enabled", True) else "off"
+                console.print(f"[cyan]Niveau d'effort de réflexion actuel : [bold]{curr}[/bold][/cyan]")
+                console.print("[dim]Usage : /effort <minimal|low|medium|high|xhigh|off>[/dim]")
+            else:
+                self.manager.set_reasoning_effort(active_name, arg.lower())
+            return True
+
+        # /think <on|off>
+        elif cmd == "/think":
+            active_name = self.manager.get_active_preset_name()
+            if not active_name:
+                console.print("[yellow]Aucun profil actif.[/yellow]")
+            elif not arg:
+                preset = self.manager.get_active_preset()
+                rs = preset.get("reasoning", {}) if preset else {}
+                is_on = rs.get("enabled", True) and rs.get("effort", "medium") != "off"
+                state = "[bold green]activé (ON)[/bold green]" if is_on else "[bold yellow]désactivé (OFF)[/bold yellow]"
+                console.print(f"Mode réflexion (Thinking) : {state}")
+                console.print("[dim]Usage : /think <on|off>[/dim]")
+            else:
+                opt = arg.lower()
+                if opt in ("on", "true", "1", "oui"):
+                    self.manager.set_reasoning_effort(active_name, "medium")
+                elif opt in ("off", "false", "0", "non"):
+                    self.manager.set_reasoning_effort(active_name, "off")
+                else:
+                    console.print("[yellow]Usage : /think <on|off>[/yellow]")
+            return True
+
+        # /update : Vérifier et installer les mises à jour GitHub
+        elif cmd in ("/update", "/upgrade", "/maj"):
+            from .updater import run_update_interactive
+            run_update_interactive()
             return True
 
         # /presets ou /list
@@ -389,54 +620,95 @@ class IADroidCLI:
         hw = preset.get("hardware", {})
         device_label = hw.get("device", "gpu").upper()
 
+        # Raisonnement & Thinking
+        rs = preset.get("reasoning", {})
+        effort = rs.get("effort", "medium") if rs.get("enabled", True) else "off"
+
         # Construction des messages pour l'API /v1/chat/completions (OpenAI compatible)
         messages = []
-        if sys_prompt:
-            messages.append({"role": "system", "content": sys_prompt})
+        full_sys_prompt = sys_prompt
+
+        # Si le mode réflexion est activé, guider le modèle vers l'utilisation des balises <think>
+        if effort != "off" and "<think>" not in sys_prompt:
+            budget = rs.get("budget_tokens", 1024)
+            thinking_rule = (
+                f"\n[Mode Réflexion Activé - Effort: {effort}]\n"
+                f"Avant de donner ta réponse finale, analyse méthodiquement la question de l'utilisateur. "
+                f"Inscris impérativement l'intégralité de cette réflexion et de tes étapes de raisonnement "
+                f"entre les balises <think> et </think>. "
+                f"Après la balise fermante </think>, fournis ta réponse claire et directe."
+            )
+            full_sys_prompt = (sys_prompt + "\n" + thinking_rule).strip() if sys_prompt else thinking_rule.strip()
+
+        if full_sys_prompt:
+            messages.append({"role": "system", "content": full_sys_prompt})
 
         for role, content in self.conversation_history:
             messages.append({"role": role, "content": content})
 
         messages.append({"role": "user", "content": user_prompt})
 
-        console.print(f"\n[bold {ANDROID_GREEN}]>[/bold {ANDROID_GREEN}] ", end="")
-        sys.stdout.flush()
+        # Indicateur de réflexion dynamique
+        spinner = console.status("[dim]💭 Réflexion en cours...[/dim]", spinner="dots")
+        spinner.start()
+        start_time = time.time()
+        first_token_received = False
+        think_start_time = 0
 
-        buffer = []
-        in_think_block = False
-
-        def on_token(token: str):
-            nonlocal in_think_block
-            buffer.append(token)
-            curr = "".join(buffer)
-
-            # Détection des balises de réflexion <think> ... </think>
-            if "<think>" in curr and not in_think_block:
-                in_think_block = True
-                console.print(f"\n[dim italic]💭 Réflexion :[/dim italic] ", end="")
-                sys.stdout.flush()
-                return
-
-            if in_think_block and "</think>" in curr:
-                in_think_block = False
-                console.print(f"\n\n[bold {ANDROID_GREEN}]>[/bold {ANDROID_GREEN}] ", end="")
-                sys.stdout.flush()
-                return
-
-            if in_think_block:
-                console.print(f"[dim italic]{token}[/dim italic]", end="")
-            else:
-                console.print(token, end="")
+        def on_think_start():
+            nonlocal think_start_time
+            think_start_time = time.time()
+            console.print(f"\n[dim]┌─ 💭 [italic]Réflexion[/italic][/dim]")
             sys.stdout.flush()
+
+        def on_think_token(tok: str):
+            console.print(f"[dim italic]{tok}[/dim italic]", end="")
+            sys.stdout.flush()
+
+        def on_think_end(tok_count: int):
+            t_elapsed = max(0.1, time.time() - (think_start_time or start_time))
+            console.print(f"\n[dim]└─ ✓ Réflexion terminée ({t_elapsed:.1f}s, {tok_count} tokens)[/dim]\n")
+            sys.stdout.flush()
+
+        def on_response_start():
+            # Si aucune réflexion via <think> n'a été émise, afficher le temps de calcul / réflexion initial
+            if not parser.full_think_text:
+                prefill_sec = max(0.1, time.time() - start_time)
+                console.print(f"\n[dim]💭 Réfléchi en {prefill_sec:.1f}s[/dim]")
+            console.print(f"\n[bold {ANDROID_GREEN}]>[/bold {ANDROID_GREEN}] ", end="")
+            sys.stdout.flush()
+
+        def on_response_token(tok: str):
+            console.print(tok, end="")
+            sys.stdout.flush()
+
+        parser = ThinkStreamParser(
+            on_think_start=on_think_start,
+            on_think_token=on_think_token,
+            on_think_end=on_think_end,
+            on_response_start=on_response_start,
+            on_response_token=on_response_token
+        )
+
+        def on_raw_token(token: str):
+            nonlocal first_token_received
+            if not first_token_received:
+                first_token_received = True
+                spinner.stop()
+            parser.feed(token)
 
         try:
             full_reply, elapsed, gen_tokens = self.server.stream_chat(
                 messages=messages,
                 sampling=preset.get("sampling", {}),
-                on_token=on_token
+                on_token=on_raw_token
             )
+            parser.finish()
 
-            clean_reply = full_reply.strip()
+            clean_reply = "".join(parser.full_response_text).strip()
+            if not clean_reply and full_reply:
+                clean_reply = full_reply.strip()
+
             self.conversation_history.append(("user", user_prompt))
             self.conversation_history.append(("assistant", clean_reply))
 
@@ -453,6 +725,8 @@ class IADroidCLI:
             console.print("\n[yellow]Génération interrompue par l'utilisateur (Ctrl+C).[/yellow]\n")
         except Exception as e:
             console.print(f"\n[red]Erreur lors de la génération : {e}[/red]\n")
+        finally:
+            spinner.stop()
 
     def run_raw_llama_cli(self):
         """Lance llama-cli en mode brut interactif plein écran (expert/debug)."""
@@ -475,7 +749,11 @@ class IADroidCLI:
     def start(self):
         """Boucle principale du CLI."""
         os.system("clear" if os.name != "nt" else "cls")
-        display_welcome_banner(self.manager.get_active_preset())
+
+        # Vérification en arrière-plan d'une mise à jour GitHub (rapide / mise en cache)
+        from .updater import UpdateChecker
+        has_update = UpdateChecker.cached_check_has_update()
+        display_welcome_banner(self.manager.get_active_preset(), has_update=has_update)
 
         # Calcul initial des tokens
         active_preset = self.manager.get_active_preset()
@@ -486,11 +764,9 @@ class IADroidCLI:
         try:
             while True:
                 try:
-                    term_width = shutil.get_terminal_size().columns
-                    console.print(f"[dim]{'─' * min(term_width, 80)}[/dim]")
-
+                    # Invite de commande style Claude Code avec bordures haut/bas et barre d'état colorée
                     user_input = self.session.prompt(
-                        [('class:prompt', '> ')],
+                        self.get_prompt_message,
                         style=self.style,
                         bottom_toolbar=self.get_bottom_toolbar
                     )

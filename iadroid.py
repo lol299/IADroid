@@ -23,6 +23,10 @@ def main():
         if arg in ("--help", "-h"):
             print_help_table()
             return
+        elif arg in ("--update", "-u"):
+            from iadroid.updater import run_update_interactive
+            run_update_interactive()
+            return
         elif arg in ("--list", "-l"):
             manager.display_presets_table()
             return

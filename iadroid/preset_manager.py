@@ -189,6 +189,34 @@ class PresetManager:
         console.print(f"[{status_color}]✓ Profil '{name}' configuré en mode {device.upper()} (ngl: {data['hardware']['ngl']})[/{status_color}]")
         return True
 
+    def set_reasoning_effort(self, name: str, effort: str) -> bool:
+        """Modifie le niveau d'effort de réflexion (/effort <minimal|low|medium|high|xhigh|off>)."""
+        data = self.load_preset(name)
+        if not data:
+            console.print(f"[red]Profil '{name}' introuvable.[/red]")
+            return False
+
+        effort = effort.lower().strip()
+        valid_efforts = ("minimal", "low", "medium", "high", "xhigh", "off")
+        if effort not in valid_efforts:
+            console.print(f"[yellow]Niveau invalide. Choix possibles : {', '.join(valid_efforts)}[/yellow]")
+            return False
+
+        from .config import REASONING_TOKEN_BUDGETS
+        rs = data.setdefault("reasoning", {})
+        if effort == "off":
+            rs["enabled"] = False
+            rs["effort"] = "off"
+            console.print(f"[yellow]✓ Mode réflexion désactivé pour le profil '{name}'.[/yellow]")
+        else:
+            rs["enabled"] = True
+            rs["effort"] = effort
+            rs["budget_tokens"] = REASONING_TOKEN_BUDGETS.get(effort, 1024)
+            console.print(f"[bold {ANDROID_GREEN}]✓ Effort de réflexion configuré sur '{effort}' ({rs['budget_tokens']} tokens) pour '{name}'.[/bold {ANDROID_GREEN}]")
+
+        self.save_preset(name, data)
+        return True
+
     def build_llama_cli_command(self, preset_data: Dict[str, Any], interactive: bool = True) -> List[str]:
         """Génère la liste d'arguments pour invoquer llama-cli."""
         cmd = [str(LLAMA_CLI_PATH)]
