@@ -19,7 +19,8 @@ from rich.console import Console
 from .config import (
     LLAMA_SERVER_PATH,
     LOGS_DIR,
-    ANDROID_GREEN
+    ANDROID_GREEN,
+    get_gpu_type
 )
 from .preset_manager import is_llama_running, stop_llama_processes
 
@@ -88,10 +89,32 @@ class LlamaServer:
             console.print("[yellow]Veuillez taper /cmake-recompiler pour compiler llama-server.[/yellow]")
             return False
 
-        # Vérification du modèle
+        # Vérification du modèle et des permissions de lecture
         model_path = preset_data.get("model_path")
-        if not model_path or not os.path.exists(model_path):
+        if not model_path:
+            console.print("[red]Chemin du modèle non spécifié dans le profil.[/red]")
+            return False
+
+        try:
+            with open(model_path, "rb") as f:
+                header = f.read(4)
+                if header != b"GGUF":
+                    console.print(f"[yellow]⚠️ Attention : Le fichier {model_path} ne semble pas être un modèle GGUF valide.[/yellow]")
+        except PermissionError:
+            console.print(f"\n[bold red]✗ Erreur de permission Android (Permission denied) :[/bold red]")
+            console.print(f"  [yellow]Termux n'a pas l'autorisation d'accéder au stockage Android pour lire ce fichier :[/yellow]")
+            console.print(f"  [white]{model_path}[/white]\n")
+            console.print("  [cyan]Solutions recommandées :[/cyan]")
+            console.print("  1. Tapez dans Termux : [bold green]termux-setup-storage[/bold green] et acceptez la demande d'accès.")
+            console.print("  2. Dans Paramètres Android > Applications > Termux > Autorisations > Fichiers : cochez [bold green]'Autoriser la gestion de tous les fichiers'[/bold green].")
+            console.print("  3. Ou déplacez le modèle .gguf dans le stockage interne de Termux : [bold green]~/.iadroid/models/[/bold green]\n")
+            return False
+        except FileNotFoundError:
             console.print(f"[red]Fichier modèle introuvable : {model_path}[/red]")
+            console.print("[yellow]Vérifiez le chemin du fichier avec /profil_config ou téléchargez un modèle.[/yellow]")
+            return False
+        except Exception as e:
+            console.print(f"[red]Erreur lors de l'accès au fichier modèle : {e}[/red]")
             return False
 
         # Construction des arguments pour llama-server
@@ -159,7 +182,8 @@ class LlamaServer:
         log_fp = open(self.log_file, "w", encoding="utf-8", errors="replace")
 
         if verbose:
-            dev_str = "GPU Vulkan (Adreno)" if ngl > 0 else "CPU ARM64"
+            gpu_name = get_gpu_type()
+            dev_str = f"GPU Vulkan ({gpu_name})" if ngl > 0 else "CPU ARM64"
             console.print(f"[cyan]⚡ Démarrage de llama-server en arrière-plan ({dev_str})...[/cyan]")
             console.print(f"[dim]Modèle : {os.path.basename(model_path)} | Contexte : {ctx_size} tokens[/dim]")
 
@@ -208,13 +232,23 @@ class LlamaServer:
                     for l in err_lines:
                         console.print(f"  [dim]{l}[/dim]")
                     full_log = "\n".join(err_lines).lower()
-                    if "createcomputepipeline" in full_log or "vk::" in full_log or "errorunknown" in full_log:
-                        console.print("\n[bold red]💡 Diagnostic GPU Vulkan :[/bold red]")
-                        console.print("  [yellow]Le pilote Vulkan Adreno du smartphone a rejeté la compilation du pipeline de calcul GPU.[/yellow]")
+                    if "permission denied" in full_log:
+                        console.print("\n[bold red]💡 Diagnostic Permission Android (Permission denied) :[/bold red]")
+                        console.print("  [yellow]Termux n'a pas l'autorisation d'accéder au fichier dans le stockage Android partagé.[/yellow]")
                         console.print("  [cyan]Solutions recommandées :[/cyan]")
-                        console.print("  • Basculer en mode CPU ultra-rapide (6 t/s) : [bold green]/device cpu[/bold green]")
+                        console.print("  1. Tapez dans Termux : [bold green]termux-setup-storage[/bold green] et validez l'autorisation.")
+                        console.print("  2. Dans Paramètres Android > Applications > Termux > Autorisations > Fichiers : cochez [bold green]'Autoriser la gestion de tous les fichiers'[/bold green].")
+                        console.print("  3. Ou déplacez le modèle .gguf dans le stockage privé de Termux : [bold green]~/.iadroid/models/[/bold green]")
+                    elif "createcomputepipeline" in full_log or "vk::" in full_log or "errorunknown" in full_log:
+                        gpu_name = get_gpu_type()
+                        console.print(f"\n[bold red]💡 Diagnostic GPU Vulkan ({gpu_name}) :[/bold red]")
+                        console.print(f"  [yellow]Le pilote Vulkan {gpu_name} du smartphone a rejeté la compilation du pipeline de calcul GPU (createComputePipeline).[/yellow]")
+                        if "gemma" in os.path.basename(model_path).lower():
+                            console.print("  [red]⚠️ Incompatibilité connue : L'architecture Gemma (logit soft-capping / head_dim=256) fait souvent échouer les shaders Vulkan sur GPU mobile.[/red]")
+                        console.print("  [cyan]Solutions recommandées :[/cyan]")
+                        console.print("  • Basculer en mode CPU ultra-rapide (très performant sur Snapdragon 8 Gen 3 & Dimensity) : [bold green]/device cpu[/bold green]")
                         console.print("  • Désactiver Flash Attention sur GPU : [bold green]/fa off[/bold green]")
-                        console.print("  • Décharger moins de couches VRAM : [bold green]/device gpu 20[/bold green]")
+                        console.print("  • Décharger moins de couches VRAM : [bold green]/device gpu 15[/bold green]")
             except Exception:
                 pass
             self.stop()

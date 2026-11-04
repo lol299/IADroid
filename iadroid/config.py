@@ -68,6 +68,22 @@ def get_ram_info() -> tuple:
         pass
     return (0.0, 0.0, 0.0, 0.0)
 
+def get_gpu_type() -> str:
+    """
+    Détecte l'architecture matérielle du GPU sous Android :
+    - 'Adreno' (Qualcomm Snapdragon via /dev/kgsl-3d0)
+    - 'Mali' (MediaTek Dimensity / Samsung Exynos / Google Tensor via /dev/mali0)
+    - 'Vulkan' (Générique / Autre)
+    """
+    try:
+        if Path("/dev/kgsl-3d0").exists():
+            return "Adreno"
+        elif Path("/dev/mali0").exists():
+            return "Mali"
+    except Exception:
+        pass
+    return "Vulkan"
+
 def ensure_directories():
     """Crée l'arborescence des dossiers et assure la liaison du pilote GPU Vulkan sous Termux."""
     for d in (PRESETS_DIR, MODELS_DIR, BIN_DIR, LOGS_DIR):
