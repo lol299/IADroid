@@ -168,8 +168,8 @@ class PresetManager:
 
         console.print(table)
 
-    def set_device_mode(self, name: str, device: str) -> bool:
-        """Bascule le profil entre CPU et GPU (/device <cpu|gpu>)."""
+    def set_device_mode(self, name: str, device: str, ngl: Optional[int] = None) -> bool:
+        """Bascule le profil entre CPU et GPU (/device <cpu|gpu> [ngl])."""
         data = self.load_preset(name)
         if not data:
             console.print(f"[red]Profil '{name}' introuvable.[/red]")
@@ -182,11 +182,29 @@ class PresetManager:
 
         data.setdefault("hardware", {})
         data["hardware"]["device"] = device
-        data["hardware"]["ngl"] = 99 if device == "gpu" else 0
+        if ngl is not None:
+            data["hardware"]["ngl"] = max(0, ngl)
+        else:
+            data["hardware"]["ngl"] = 99 if device == "gpu" else 0
 
         self.save_preset(name, data)
         status_color = "green" if device == "gpu" else "yellow"
         console.print(f"[{status_color}]✓ Profil '{name}' configuré en mode {device.upper()} (ngl: {data['hardware']['ngl']})[/{status_color}]")
+        return True
+
+    def set_flash_attention(self, name: str, enabled: bool) -> bool:
+        """Active ou désactive Flash Attention (/fa <on|off>)."""
+        data = self.load_preset(name)
+        if not data:
+            console.print(f"[red]Profil '{name}' introuvable.[/red]")
+            return False
+
+        hw = data.setdefault("hardware", {})
+        hw["flash_attention"] = bool(enabled)
+        hw["gpu_flash_attention"] = bool(enabled)
+        self.save_preset(name, data)
+        status = "[bold green]activé (-fa on)[/bold green]" if enabled else "[bold yellow]désactivé (-fa off)[/bold yellow]"
+        console.print(f"✓ Flash Attention configuré sur : {status} pour '{name}'.")
         return True
 
     def set_reasoning_effort(self, name: str, effort: str) -> bool:
@@ -321,12 +339,16 @@ class PresetManager:
             cmd.extend(["--mmproj", mmproj])
 
         hw = preset_data.get("hardware", {})
-        ngl = hw.get("ngl", 99 if hw.get("device", "gpu") == "gpu" else 0)
+        dev = hw.get("device", "gpu")
+        ngl = hw.get("ngl", 99 if dev == "gpu" else 0)
         cmd.extend(["-ngl", str(ngl)])
         cmd.extend(["-t", str(hw.get("cpu_threads", 4))])
         cmd.extend(["-b", str(hw.get("batch", 512)), "-ub", str(hw.get("ubatch", 128))])
 
-        if hw.get("flash_attention", True):
+        # Flash Attention : Sur GPU Vulkan mobile (Adreno), le shader Flash Attention fait crasher
+        # le pilote avec 'createComputePipeline: ErrorUnknown'. On ne l'active sur GPU que si forcé.
+        use_fa = hw.get("gpu_flash_attention", False) if dev == "gpu" else hw.get("flash_attention", True)
+        if use_fa:
             cmd.extend(["-fa", "on"])
         else:
             cmd.extend(["-fa", "off"])
@@ -374,12 +396,16 @@ class PresetManager:
             cmd.extend(["--mmproj", mmproj])
 
         hw = preset_data.get("hardware", {})
-        ngl = hw.get("ngl", 99 if hw.get("device", "gpu") == "gpu" else 0)
+        dev = hw.get("device", "gpu")
+        ngl = hw.get("ngl", 99 if dev == "gpu" else 0)
         cmd.extend(["-ngl", str(ngl)])
         cmd.extend(["-t", str(hw.get("cpu_threads", 4))])
         cmd.extend(["-b", str(hw.get("batch", 512)), "-ub", str(hw.get("ubatch", 128))])
 
-        if hw.get("flash_attention", True):
+        # Flash Attention : Sur GPU Vulkan mobile (Adreno), le shader Flash Attention fait crasher
+        # le pilote avec 'createComputePipeline: ErrorUnknown'. On ne l'active sur GPU que si forcé.
+        use_fa = hw.get("gpu_flash_attention", False) if dev == "gpu" else hw.get("flash_attention", True)
+        if use_fa:
             cmd.extend(["-fa", "on"])
         else:
             cmd.extend(["-fa", "off"])

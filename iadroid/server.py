@@ -109,12 +109,15 @@ class LlamaServer:
 
         # Hardware & GPU
         hw = preset_data.get("hardware", {})
-        ngl = hw.get("ngl", 99 if hw.get("device", "gpu") == "gpu" else 0)
+        dev = hw.get("device", "gpu")
+        ngl = hw.get("ngl", 99 if dev == "gpu" else 0)
         cmd.extend(["-ngl", str(ngl)])
         cmd.extend(["-t", str(hw.get("cpu_threads", 4))])
         cmd.extend(["-b", str(hw.get("batch", 512)), "-ub", str(hw.get("ubatch", 128))])
 
-        if hw.get("flash_attention", True):
+        # Flash Attention : Sur GPU Vulkan mobile (Adreno), -fa on fait crasher le pilote avec 'createComputePipeline: ErrorUnknown'
+        use_fa = hw.get("gpu_flash_attention", False) if dev == "gpu" else hw.get("flash_attention", True)
+        if use_fa:
             cmd.extend(["-fa", "on"])
         else:
             cmd.extend(["-fa", "off"])
@@ -204,6 +207,14 @@ class LlamaServer:
                     console.print(f"[yellow]Derniers logs du serveur ({self.log_file}) :[/yellow]")
                     for l in err_lines:
                         console.print(f"  [dim]{l}[/dim]")
+                    full_log = "\n".join(err_lines).lower()
+                    if "createcomputepipeline" in full_log or "vk::" in full_log or "errorunknown" in full_log:
+                        console.print("\n[bold red]💡 Diagnostic GPU Vulkan :[/bold red]")
+                        console.print("  [yellow]Le pilote Vulkan Adreno du smartphone a rejeté la compilation du pipeline de calcul GPU.[/yellow]")
+                        console.print("  [cyan]Solutions recommandées :[/cyan]")
+                        console.print("  • Basculer en mode CPU ultra-rapide (6 t/s) : [bold green]/device cpu[/bold green]")
+                        console.print("  • Désactiver Flash Attention sur GPU : [bold green]/fa off[/bold green]")
+                        console.print("  • Décharger moins de couches VRAM : [bold green]/device gpu 20[/bold green]")
             except Exception:
                 pass
             self.stop()

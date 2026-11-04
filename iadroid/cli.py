@@ -185,6 +185,7 @@ class IADroidCompleter(Completer):
             "/effort",
             "/think",
             "/show-think",
+            "/fa",
             "/update",
             "/presets",
             "/use",
@@ -260,6 +261,14 @@ class IADroidCompleter(Completer):
 
         # Complétion pour /show-think
         if words[0] in ("/show-think", "/think-display", "/show_think"):
+            sub_prefix = words[1] if len(words) > 1 and not text.endswith(" ") else ""
+            for opt in ("on", "off"):
+                if opt.startswith(sub_prefix):
+                    yield Completion(opt, start_position=-len(sub_prefix))
+            return
+
+        # Complétion pour /fa
+        if words[0] in ("/fa", "/flash-attention"):
             sub_prefix = words[1] if len(words) > 1 and not text.endswith(" ") else ""
             for opt in ("on", "off"):
                 if opt.startswith(sub_prefix):
@@ -490,18 +499,47 @@ class IADroidCLI:
                 self.wizard.edit_system_prompt_only(target)
             return True
 
-        # /device <gpu|cpu>
+        # /device <gpu|cpu> [ngl]
         elif cmd == "/device":
             active_name = self.manager.get_active_preset_name()
             if not active_name:
                 console.print("[yellow]Aucun profil actif.[/yellow]")
-            elif not arg or arg.lower() not in ("gpu", "cpu"):
-                console.print("[yellow]Usage : /device <gpu|cpu>[/yellow]")
             else:
-                self.manager.set_device_mode(active_name, arg.lower())
-                if self.server.is_ready():
-                    console.print(f"[cyan]Redémarrage du modèle en mode {arg.upper()}...[/cyan]")
-                    self.server.start(self.manager.get_active_preset())
+                parts = arg.split()
+                mode = parts[0].lower() if parts else ""
+                if mode not in ("gpu", "cpu"):
+                    console.print("[yellow]Usage : /device <gpu|cpu> [ngl][/yellow]")
+                else:
+                    ngl_val = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+                    self.manager.set_device_mode(active_name, mode, ngl=ngl_val)
+                    if self.server.is_ready():
+                        console.print(f"[cyan]Redémarrage du modèle en mode {mode.upper()}...[/cyan]")
+                        self.server.start(self.manager.get_active_preset())
+            return True
+
+        # /fa <on|off> : Activer ou désactiver Flash Attention (-fa)
+        elif cmd in ("/fa", "/flash-attention"):
+            active_name = self.manager.get_active_preset_name()
+            if not active_name:
+                console.print("[yellow]Aucun profil actif.[/yellow]")
+            elif not arg:
+                preset = self.manager.get_active_preset()
+                hw = preset.get("hardware", {}) if preset else {}
+                dev = hw.get("device", "gpu")
+                is_on = hw.get("gpu_flash_attention", False) if dev == "gpu" else hw.get("flash_attention", True)
+                state = "[bold green]activé (ON)[/bold green]" if is_on else "[bold yellow]désactivé (OFF)[/bold yellow]"
+                console.print(f"Flash Attention (-fa) : {state} (mode actuel: {dev.upper()})")
+                console.print("[dim]Usage : /fa <on|off>[/dim]")
+                if dev == "gpu":
+                    console.print("[dim yellow]Note : Sur GPU Vulkan mobile (Adreno), Flash Attention fait souvent crasher le pilote.[/dim yellow]")
+            else:
+                opt = arg.lower()
+                if opt in ("on", "true", "1", "oui"):
+                    self.manager.set_flash_attention(active_name, True)
+                elif opt in ("off", "false", "0", "non"):
+                    self.manager.set_flash_attention(active_name, False)
+                else:
+                    console.print("[yellow]Usage : /fa <on|off>[/yellow]")
             return True
 
         # /effort <minimal|low|medium|high|xhigh|off>
