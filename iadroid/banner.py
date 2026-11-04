@@ -53,7 +53,7 @@ def display_welcome_banner(preset_data: dict = None, has_update: bool = False):
 
     info_text = Text()
     info_text.append("IADroid CLI", style=f"bold {ANDROID_GREEN}")
-    info_text.append(" v0.1.0\n", style="bold white")
+    info_text.append(" v0.1.1\n", style="bold white")
     info_text.append("─" * (min(38, term_width - 10)) + "\n", style="dim")
     info_text.append("• Profil actif : ", style="dim")
     info_text.append(f"{preset_name}\n", style="bold cyan")
