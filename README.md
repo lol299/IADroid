@@ -64,11 +64,24 @@
 
 ---
 
-## 🚀 Installation Rapide (1 Commande)
+## 🚀 Installation Rapide (Depuis GitHub)
 
-Transférez le dossier `IADroid` dans votre répertoire personnel Termux (`~`) puis lancez :
+Dans Termux, lancez l'installation en une seule ligne :
 
 ```bash
+pkg update -y && pkg install -y git && git clone https://github.com/lol299/IADroid.git ~/IADroid && cd ~/IADroid && bash install.sh
+```
+
+Ou étape par étape :
+
+```bash
+# 1. Mettre à jour Termux et installer Git
+pkg update -y && pkg install -y git
+
+# 2. Cloner le dépôt officiel IADroid
+git clone https://github.com/lol299/IADroid.git ~/IADroid
+
+# 3. Lancer l'installateur interactif
 cd ~/IADroid
 chmod +x install.sh scripts/*.sh iadroid.py
 bash install.sh

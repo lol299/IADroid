@@ -44,14 +44,20 @@ if [[ "$CURRENT_DIR" == *"/sdcard"* ]] || [[ "$CURRENT_DIR" == *"/storage/emulat
     echo -e "${RED}[ERREUR CRITIQUE] Emplacement non exécutable détecté !${NC}"
     echo -e "${YELLOW}Vous êtes dans : $CURRENT_DIR${NC}"
     echo -e "Android interdit strictement d'exécuter des scripts ou des binaires sur le stockage partagé (/sdcard)."
-    echo -e "\nPour corriger, copiez simplement le dossier dans votre espace privé Termux :"
-    echo -e "  ${CYAN}cp -r \"$CURRENT_DIR\" ~/IADroid${NC}"
-    echo -e "  ${CYAN}cd ~/IADroid${NC}"
-    echo -e "  ${CYAN}bash install.sh${NC}\n"
+    echo -e "\nPour corriger, clonez simplement le dépôt dans votre espace privé Termux :"
+    echo -e "  ${CYAN}cd ~ && git clone https://github.com/lol299/IADroid.git ~/IADroid${NC}"
+    echo -e "  ${CYAN}cd ~/IADroid && bash install.sh${NC}\n"
     exit 1
 fi
 
-# 2. Création de l'arborescence
+# 2. Configuration Git et liaison au dépôt officiel pour /update
+git config --global --add safe.directory "*" 2>/dev/null || true
+if [ ! -d "$SCRIPT_DIR/.git" ]; then
+    echo -e "${YELLOW}[NOTE] Initialisation du lien Git vers https://github.com/lol299/IADroid.git...${NC}"
+    (cd "$SCRIPT_DIR" && git init -q && git remote add origin https://github.com/lol299/IADroid.git 2>/dev/null || git remote set-url origin https://github.com/lol299/IADroid.git)
+fi
+
+# 3. Création de l'arborescence
 mkdir -p "$IADROID_HOME/bin" \
          "$IADROID_HOME/presets" \
          "$IADROID_HOME/models" \

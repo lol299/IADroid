@@ -38,17 +38,33 @@ def get_project_root() -> Path:
         return curr
     return Path.cwd()
 
+def ensure_git_repo(root: Path) -> bool:
+    """Si .git est manquant (ex: copie manuelle), initialise git et lie le dépôt officiel GitHub."""
+    try:
+        subprocess.run(["git", "config", "--global", "--add", "safe.directory", "*"], capture_output=True, timeout=2)
+        if not (root / ".git").exists():
+            subprocess.run(["git", "init", "-q"], cwd=root, capture_output=True, timeout=5)
+            subprocess.run(["git", "remote", "add", "origin", f"https://github.com/{REPO_OWNER}/{REPO_NAME}.git"], cwd=root, capture_output=True, timeout=5)
+            subprocess.run(["git", "fetch", "origin", "main", "--quiet"], cwd=root, capture_output=True, timeout=15)
+            subprocess.run(["git", "reset", "--mixed", "origin/main"], cwd=root, capture_output=True, timeout=10)
+        return True
+    except Exception:
+        return False
+
 def get_local_commit_sha() -> Optional[str]:
     """Récupère le SHA court du commit git local."""
+    root = get_project_root()
+    ensure_git_repo(root)
     try:
+        subprocess.run(["git", "config", "--global", "--add", "safe.directory", "*"], capture_output=True, timeout=2)
         res = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
-            cwd=get_project_root(),
+            cwd=root,
             capture_output=True,
             text=True,
             timeout=3
         )
-        if res.returncode == 0:
+        if res.returncode == 0 and res.stdout.strip():
             return res.stdout.strip()
     except Exception:
         pass
@@ -56,10 +72,13 @@ def get_local_commit_sha() -> Optional[str]:
 
 def get_local_commit_full() -> Tuple[Optional[str], Optional[str]]:
     """Retourne (sha_court, message) du dernier commit local."""
+    root = get_project_root()
+    ensure_git_repo(root)
     try:
+        subprocess.run(["git", "config", "--global", "--add", "safe.directory", "*"], capture_output=True, timeout=2)
         res = subprocess.run(
             ["git", "log", "-1", "--format=%h %s"],
-            cwd=get_project_root(),
+            cwd=root,
             capture_output=True,
             text=True,
             timeout=3
@@ -178,6 +197,8 @@ class UpdateChecker:
             has_update = info["behind_count"] > 0
         elif local_sha and remote_sha:
             has_update = local_sha.lower() != remote_sha.lower()
+        elif not local_sha and remote_sha:
+            has_update = True
 
         # Liste des commits en attente si git est dispo
         incoming_commits = []
@@ -239,11 +260,13 @@ class UpdateChecker:
 def apply_update() -> Tuple[bool, str]:
     """Applique la mise à jour git pull, met à jour les dépendances et restaure les permissions."""
     root = get_project_root()
+    ensure_git_repo(root)
     if not (root / ".git").exists():
         return False, "Le dossier n'est pas un dépôt Git cloné valide."
 
     # 1. git pull
     try:
+        subprocess.run(["git", "config", "--global", "--add", "safe.directory", "*"], capture_output=True, timeout=2)
         pull_res = subprocess.run(
             ["git", "pull", "--ff-only", "origin", "main"],
             cwd=root,
