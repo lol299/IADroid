@@ -10,7 +10,6 @@ import shutil
 import threading
 import subprocess
 from pathlib import Path
-from contextlib import contextmanager
 from rich.console import Console
 from rich.panel import Panel
 
@@ -279,71 +278,6 @@ class IADroidCompleter(Completer):
                     yield Completion(opt, start_position=-len(sub_prefix))
             return
 
-class LiveBottomBar:
-    """
-    Maintient la barre d'état inférieure visible et rafraîchie chaque seconde
-    au bas de l'écran pendant l'exécution des commandes (/run, streaming, etc.),
-    en réservant une zone de défilement matérielle (DECSTBM).
-    """
-    def __init__(self, get_lines_fn):
-        self.get_lines_fn = get_lines_fn
-        self.running = False
-        self.thread = None
-        self.lock = threading.Lock()
-        self.bar_height = 3
-
-    def start(self):
-        if self.running:
-            return
-        self.running = True
-        try:
-            with self.lock:
-                h, w = shutil.get_terminal_size()
-                scroll_bottom = max(4, h - self.bar_height)
-                sys.stdout.write(f"\033[1;{scroll_bottom}r")
-                sys.stdout.flush()
-            self.render()
-            self.thread = threading.Thread(target=self._loop, daemon=True)
-            self.thread.start()
-        except Exception:
-            pass
-
-    def stop(self):
-        if not self.running:
-            return
-        self.running = False
-        if self.thread:
-            self.thread.join(timeout=0.3)
-            self.thread = None
-        try:
-            with self.lock:
-                sys.stdout.write("\033[r")  # Réinitialiser la zone de défilement plein écran
-                sys.stdout.flush()
-        except Exception:
-            pass
-
-    def render(self):
-        if not self.running:
-            return
-        try:
-            with self.lock:
-                h, w = shutil.get_terminal_size()
-                start_row = max(1, h - self.bar_height + 1)
-                lines = self.get_lines_fn(w)[:self.bar_height]
-                sys.stdout.write("\0337")  # Sauvegarder la position du curseur
-                for i, line in enumerate(lines):
-                    row = start_row + i
-                    sys.stdout.write(f"\033[{row};1H\033[2K{line}")
-                sys.stdout.write("\0338")  # Restaurer la position du curseur
-                sys.stdout.flush()
-        except Exception:
-            pass
-
-    def _loop(self):
-        while self.running:
-            time.sleep(1.0)
-            if self.running:
-                self.render()
 
 class IADroidCLI:
     def __init__(self):
@@ -355,7 +289,6 @@ class IADroidCLI:
         self.conversation_history = []  # Liste de tuples (role, content)
         self.context_tokens_used = 0
         self.last_speed = "--"
-        self.active_live_bar = None
         
         # Historique persistant des commandes
         history_file = str(IADROID_HOME / "history.txt")
@@ -517,61 +450,6 @@ class IADroidCLI:
                 f'<style fg="#888888"> (VRAM)</style>'
             )
             return HTML(f"{line_border}\n{line_metrics}\n{line_info}")
-
-    def get_bottom_lines_ansi(self, width: int = 80) -> list:
-        """Génère les lignes de la barre inférieure formatées en ANSI (pour LiveBottomBar)."""
-        w = max(10, min(width - 1, 100))
-        sep = "─" * w
-        preset = self.manager.get_active_preset()
-        p_name = preset.get("name", "Inconnu") if preset else "Inconnu"
-        hw = preset.get("hardware", {}) if preset else {}
-        dev = hw.get("device", "gpu").upper()
-        ctx_total = preset.get("context", {}).get("ctx_size", 4096) if preset else 4096
-        used = self.context_tokens_used
-        pct = (used / max(1, ctx_total)) * 100
-
-        server_status = self.server.get_status()
-        if server_status == "ready":
-            status_str = "\033[1;32m● Prêt (VRAM)\033[0m"
-        elif server_status == "loading":
-            status_str = "\033[1;33m⏳ Chargement...\033[0m"
-        else:
-            status_str = "\033[90m○ Arrêté (/run)\033[0m"
-
-        speed_str = f"{self.last_speed} t/s" if self.last_speed != "--" else "-- t/s"
-        used_ram, total_ram, ram_pct, free_ram = get_ram_info()
-
-        if ram_pct >= 85:
-            ram_color = "1;31"
-        elif ram_pct >= 70:
-            ram_color = "1;33"
-        else:
-            ram_color = "1;32"
-
-        ram_str = f"💾 RAM: \033[{ram_color}m{used_ram:.1f}G ({ram_pct:.0f}%)\033[0m/{total_ram:.1f}G | Rest: \033[1m{free_ram:.1f}G\033[0m"
-
-        if w < 75:
-            line1 = f"\033[90m{sep}\033[0m"
-            line2 = f" ⚡ \033[1;36m{speed_str}\033[0m | 🧠 \033[1m{used}/{ctx_total}\033[0m ({pct:.0f}%) | {status_str}"
-            line3 = f" {ram_str} | ❯❯ \033[1;36m{p_name}\033[0m"
-            return [line1, line2, line3]
-        else:
-            line1 = f"\033[90m{sep}\033[0m"
-            line2 = f" ⚡ \033[1;36m{speed_str}\033[0m | 🧠 Ctx: \033[1m{used}/{ctx_total}\033[0m ({pct:.1f}%) | {ram_str} | {status_str}"
-            line3 = f" ❯❯ Profil: \033[1;36m{p_name}\033[0m · \033[1;32m{dev}\033[0m · \033[90m/help pour commandes\033[0m"
-            return [line1, line2, line3]
-
-    @contextmanager
-    def live_bar(self):
-        """Gestionnaire de contexte activant la barre d'état dynamique pendant l'exécution d'une commande."""
-        bar = LiveBottomBar(self.get_bottom_lines_ansi)
-        self.active_live_bar = bar
-        bar.start()
-        try:
-            yield bar
-        finally:
-            bar.stop()
-            self.active_live_bar = None
 
     def handle_command(self, user_input: str) -> bool:
         """Exécute une commande utilisateur. Retourne False pour quitter."""
@@ -764,8 +642,7 @@ class IADroidCLI:
             self.last_speed = "--"
 
             console.print(f"\n[bold {ANDROID_GREEN}]⚡ Chargement du profil '{target}' avec llama-server...[/bold {ANDROID_GREEN}]")
-            with self.live_bar():
-                success = self.server.start(preset)
+            success = self.server.start(preset)
             if success:
                 console.print(f"[bold {ANDROID_GREEN}]✓ Modèle '{target}' prêt ! Posez votre question directement ci-dessous au prompt >[/bold {ANDROID_GREEN}]\n")
             return True
@@ -778,8 +655,7 @@ class IADroidCLI:
                 return True
             p_name = preset.get("name", "inconnu")
             console.print(f"\n[bold {ANDROID_GREEN}]⚡ Démarrage du profil '{p_name}' avec llama-server...[/bold {ANDROID_GREEN}]")
-            with self.live_bar():
-                success = self.server.start(preset)
+            success = self.server.start(preset)
             if success:
                 console.print(f"[bold {ANDROID_GREEN}]✓ Modèle '{p_name}' chargé et prêt en mémoire ![/bold {ANDROID_GREEN}]")
                 console.print("[dim]L'interface IADroid reste active. Tapez directement votre message au prompt > ci-dessous.[/dim]\n")
@@ -876,8 +752,7 @@ class IADroidCLI:
         # Si le serveur n'est pas encore prêt, le démarrer automatiquement
         if not self.server.is_ready():
             console.print("[cyan]⚡ Démarrage automatique de llama-server en mémoire...[/cyan]")
-            with self.live_bar():
-                success = self.server.start(preset)
+            success = self.server.start(preset)
             if not success:
                 return
 
@@ -962,37 +837,36 @@ class IADroidCLI:
                 spinner.stop()
             parser.feed(token)
 
-        with self.live_bar():
-            try:
-                full_reply, elapsed, gen_tokens = self.server.stream_chat(
-                    messages=messages,
-                    sampling=preset.get("sampling", {}),
-                    on_token=on_raw_token
-                )
-                parser.finish()
+        try:
+            full_reply, elapsed, gen_tokens = self.server.stream_chat(
+                messages=messages,
+                sampling=preset.get("sampling", {}),
+                on_token=on_raw_token
+            )
+            parser.finish()
 
-                clean_reply = "".join(parser.full_response_text).strip()
-                if not clean_reply and full_reply:
-                    clean_reply = full_reply.strip()
+            clean_reply = "".join(parser.full_response_text).strip()
+            if not clean_reply and full_reply:
+                clean_reply = full_reply.strip()
 
-                self.conversation_history.append(("user", user_prompt))
-                self.conversation_history.append(("assistant", clean_reply))
+            self.conversation_history.append(("user", user_prompt))
+            self.conversation_history.append(("assistant", clean_reply))
 
-                user_tokens = int(len(user_prompt.split()) * 1.3)
-                tokens_count = max(1, gen_tokens if gen_tokens > 0 else int(len(clean_reply.split()) * 1.3))
-                self.context_tokens_used += user_tokens + tokens_count
+            user_tokens = int(len(user_prompt.split()) * 1.3)
+            tokens_count = max(1, gen_tokens if gen_tokens > 0 else int(len(clean_reply.split()) * 1.3))
+            self.context_tokens_used += user_tokens + tokens_count
 
-                if elapsed > 0.05:
-                    self.last_speed = str(round(tokens_count / elapsed, 1))
+            if elapsed > 0.05:
+                self.last_speed = str(round(tokens_count / elapsed, 1))
 
-                console.print()
+            console.print()
 
-            except KeyboardInterrupt:
-                console.print("\n[yellow]Génération interrompue par l'utilisateur (Ctrl+C).[/yellow]\n")
-            except Exception as e:
-                console.print(f"\n[red]Erreur lors de la génération : {e}[/red]\n")
-            finally:
-                spinner.stop()
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Génération interrompue par l'utilisateur (Ctrl+C).[/yellow]\n")
+        except Exception as e:
+            console.print(f"\n[red]Erreur lors de la génération : {e}[/red]\n")
+        finally:
+            spinner.stop()
 
     def run_raw_llama_cli(self):
         """Lance llama-cli en mode brut interactif plein écran (expert/debug)."""
@@ -1005,18 +879,12 @@ class IADroidCLI:
             console.print("[yellow]Arrêt du serveur local pour lancer la session brute...[/yellow]")
             self.server.stop()
 
-        if getattr(self, "active_live_bar", None):
-            self.active_live_bar.stop()
-
         try:
             cmd = self.manager.build_llama_cli_command(preset, interactive=True)
             console.print(f"\n[bold {ANDROID_GREEN}]Lancement brut de llama-cli...[/bold {ANDROID_GREEN}]\n")
             subprocess.run(cmd)
         except Exception as e:
             console.print(f"[red]Erreur lors de l'exécution brute : {e}[/red]")
-        finally:
-            if getattr(self, "active_live_bar", None):
-                self.active_live_bar.start()
 
     def start(self):
         """Boucle principale du CLI."""

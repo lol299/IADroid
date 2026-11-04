@@ -264,9 +264,10 @@ def apply_update() -> Tuple[bool, str]:
     if not (root / ".git").exists():
         return False, "Le dossier n'est pas un dépôt Git cloné valide."
 
-    # 1. git pull
+    # 1. git pull avec récupération propre et gestion des conflits locaux
     try:
         subprocess.run(["git", "config", "--global", "--add", "safe.directory", "*"], capture_output=True, timeout=2)
+        subprocess.run(["git", "fetch", "origin", "main"], cwd=root, capture_output=True, timeout=20)
         pull_res = subprocess.run(
             ["git", "pull", "--ff-only", "origin", "main"],
             cwd=root,
@@ -275,7 +276,8 @@ def apply_update() -> Tuple[bool, str]:
             timeout=30
         )
         if pull_res.returncode != 0:
-            # En cas de conflit ou de divergence, tenter pull standard
+            # En cas de fichiers modifiés localement (ex: iadroid.py), stasher pour éviter le blocage
+            subprocess.run(["git", "stash"], cwd=root, capture_output=True, timeout=10)
             pull_res = subprocess.run(
                 ["git", "pull", "origin", "main"],
                 cwd=root,
@@ -284,7 +286,16 @@ def apply_update() -> Tuple[bool, str]:
                 timeout=30
             )
             if pull_res.returncode != 0:
-                return False, f"Échec de git pull : {pull_res.stderr.strip() or pull_res.stdout.strip()}"
+                # Si pull standard échoue encore, forcer l'alignement sur origin/main
+                reset_res = subprocess.run(
+                    ["git", "reset", "--hard", "origin/main"],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    timeout=15
+                )
+                if reset_res.returncode != 0:
+                    return False, f"Échec de git pull : {pull_res.stderr.strip() or reset_res.stderr.strip() or pull_res.stdout.strip()}"
     except Exception as e:
         return False, f"Erreur lors du pull Git : {e}"
 
