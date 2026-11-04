@@ -104,6 +104,7 @@ def print_help_table():
     table.add_row("/device", "<gpu|cpu>", "Basculer instantanément le profil actif entre GPU (Vulkan) et CPU")
     table.add_row("/effort", "<level>", "Régler l'effort de réflexion (minimal|low|medium|high|xhigh|off)")
     table.add_row("/think", "<on|off>", "Activer ou désactiver rapidement le mode réflexion (Thinking)")
+    table.add_row("/show-think", "<on|off>", "Afficher ou masquer les blocs de réflexion bruts à l'écran")
     table.add_row("/presets", "", "Lister tous les profils enregistrés")
     table.add_row("/use", "<nom>", "Activer un profil spécifique")
     table.add_row("/reset", "", "Réinitialiser le contexte de la conversation en cours")

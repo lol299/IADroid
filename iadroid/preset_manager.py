@@ -217,6 +217,20 @@ class PresetManager:
         self.save_preset(name, data)
         return True
 
+    def set_show_thinking(self, name: str, show: bool) -> bool:
+        """Active ou désactive l'affichage du bloc de réflexion (/show-think <on|off>)."""
+        data = self.load_preset(name)
+        if not data:
+            console.print(f"[red]Profil '{name}' introuvable.[/red]")
+            return False
+
+        rs = data.setdefault("reasoning", {})
+        rs["show_thinking"] = bool(show)
+        self.save_preset(name, data)
+        status = "[bold green]activé (ON)[/bold green]" if show else "[bold yellow]masqué (OFF)[/bold yellow]"
+        console.print(f"✓ Affichage de la réflexion configuré sur : {status} pour '{name}'.")
+        return True
+
     def build_llama_cli_command(self, preset_data: Dict[str, Any], interactive: bool = True) -> List[str]:
         """Génère la liste d'arguments pour invoquer llama-cli."""
         cmd = [str(LLAMA_CLI_PATH)]
