@@ -331,6 +331,8 @@ class IADroidCLI:
         self.conversation_history = []  # Liste de tuples (role, content)
         self.context_tokens_used = 0
         self.last_speed = "--"
+        self._last_status_check = 0.0
+        self._cached_server_status = "stopped"
         
         # Historique persistant des commandes
         history_file = str(IADROID_HOME / "history.txt")
@@ -437,8 +439,13 @@ class IADroidCLI:
         ratio = min(1.0, max(0.0, used / max(1, ctx_total)))
         pct = ratio * 100
 
-        # Statut serveur
-        server_status = self.server.get_status()
+        # Statut serveur (mis en cache 2.5s pour préserver les connexions HTTP et éviter la famine)
+        now = time.time()
+        if now - self._last_status_check > 2.5:
+            self._cached_server_status = self.server.get_status()
+            self._last_status_check = now
+        server_status = self._cached_server_status
+
         if server_status == "ready":
             status_badge = '<style fg="#3DDC84"><b>● Prêt (VRAM)</b></style>'
         elif server_status == "loading":
@@ -568,6 +575,7 @@ class IADroidCLI:
                     if self.server.is_ready():
                         console.print(f"[cyan]Redémarrage du modèle en mode {mode.upper()}...[/cyan]")
                         self.server.start(self.manager.get_active_preset())
+                        self._last_status_check = 0.0
             return True
 
         # /fa <on|off> : Activer ou désactiver Flash Attention (-fa)
@@ -687,6 +695,7 @@ class IADroidCLI:
 
             console.print(f"\n[bold {ANDROID_GREEN}]⚡ Chargement du profil '{target}' avec llama-server...[/bold {ANDROID_GREEN}]")
             success = self.server.start(preset)
+            self._last_status_check = 0.0
             if success:
                 console.print(f"[bold {ANDROID_GREEN}]✓ Modèle '{target}' prêt ! Posez votre question directement ci-dessous au prompt >[/bold {ANDROID_GREEN}]\n")
             return True
@@ -700,6 +709,7 @@ class IADroidCLI:
             p_name = preset.get("name", "inconnu")
             console.print(f"\n[bold {ANDROID_GREEN}]⚡ Démarrage du profil '{p_name}' avec llama-server...[/bold {ANDROID_GREEN}]")
             success = self.server.start(preset)
+            self._last_status_check = 0.0
             if success:
                 console.print(f"[bold {ANDROID_GREEN}]✓ Modèle '{p_name}' chargé et prêt en mémoire ![/bold {ANDROID_GREEN}]")
                 console.print("[dim]L'interface IADroid reste active. Tapez directement votre message au prompt > ci-dessous.[/dim]\n")
@@ -708,6 +718,7 @@ class IADroidCLI:
         # /stop : Arrêter le serveur actif et libérer la mémoire RAM et VRAM GPU
         elif cmd in ("/stop", "/kill"):
             self.server.stop()
+            self._last_status_check = 0.0
             console.print(f"[bold {ANDROID_GREEN}]✓ Serveur arrêté. Mémoire RAM et VRAM GPU libérées avec succès ![/bold {ANDROID_GREEN}]")
             return True
 
@@ -797,6 +808,7 @@ class IADroidCLI:
         if not self.server.is_ready():
             console.print("[cyan]⚡ Démarrage automatique de llama-server en mémoire...[/cyan]")
             success = self.server.start(preset)
+            self._last_status_check = 0.0
             if not success:
                 return
 
@@ -894,8 +906,7 @@ class IADroidCLI:
             full_reply, elapsed, gen_tokens = self.server.stream_chat(
                 messages=messages,
                 sampling=preset.get("sampling", {}),
-                on_token=on_raw_token,
-                reasoning_effort=effort if thinking_enabled else "none"
+                on_token=on_raw_token
             )
             parser.finish()
 
@@ -917,6 +928,10 @@ class IADroidCLI:
 
         except KeyboardInterrupt:
             console.print("\n[yellow]Génération interrompue par l'utilisateur (Ctrl+C).[/yellow]\n")
+        except RuntimeError as e:
+            spinner.stop()
+            console.print(f"\n[red]✗ {e}[/red]")
+            console.print("[yellow]Conseil : tapez /stop puis /load pour redémarrer le serveur.[/yellow]\n")
         except Exception as e:
             console.print(f"\n[red]Erreur lors de la génération : {e}[/red]\n")
         finally:

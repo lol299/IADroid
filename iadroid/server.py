@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import time
+import socket
 import subprocess
 import urllib.request
 import urllib.error
@@ -45,9 +46,18 @@ class LlamaServer:
         - 'loading' : Modèle en cours de chargement en RAM/VRAM (503)
         - 'stopped' : Serveur non actif ou éteint
         """
+        # Vérifier d'abord que le processus est vivant
+        if self.process and self.process.poll() is not None:
+            self.process = None
+            return "stopped"
+
         try:
-            req = urllib.request.Request(f"{self.base_url}/health", method="GET")
-            with urllib.request.urlopen(req, timeout=0.6) as resp:
+            req = urllib.request.Request(
+                f"{self.base_url}/health",
+                method="GET",
+                headers={"Connection": "close"}
+            )
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
                     if data.get("status") == "ok":
@@ -122,7 +132,8 @@ class LlamaServer:
             str(LLAMA_SERVER_PATH),
             "-m", model_path,
             "--host", self.host,
-            "--port", str(self.port)
+            "--port", str(self.port),
+            "--alias", p_name
         ]
 
         # Multimodal vision (mmproj)
@@ -283,11 +294,28 @@ class LlamaServer:
         """
         Envoie une requête de chat au format standard OpenAI /v1/chat/completions
         et diffuse la réponse token par token via Server-Sent Events (SSE).
+        Gère à la fois le flux de réponse standard (content) et le flux de réflexion (reasoning_content).
         Retourne (texte_complet, durée_secondes, nombre_tokens).
         """
+        # Vérifier que le processus serveur est toujours vivant avant d'envoyer
+        if self.process and self.process.poll() is not None:
+            raise RuntimeError(
+                f"Le processus llama-server a crashé (code retour: {self.process.returncode}). "
+                "Relancez avec /load ou /run."
+            )
+
+        # Vérifier la disponibilité du serveur via health check
+        status = self.get_status()
+        if status != "ready":
+            raise RuntimeError(
+                f"Le serveur n'est pas prêt (statut: {status}). "
+                "Relancez avec /load ou /run."
+            )
+
         url = f"{self.base_url}/v1/chat/completions"
 
         payload = {
+            "model": self.active_preset_name or "default",
             "messages": messages,
             "stream": True,
             "temperature": sampling.get("temperature", 0.7),
@@ -297,24 +325,29 @@ class LlamaServer:
             "repeat_penalty": sampling.get("repeat_penalty", 1.1)
         }
 
-        if reasoning_effort:
-            payload["reasoning_effort"] = reasoning_effort
-
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+                "Connection": "close"
+            }
         )
 
         full_response = []
         token_count = 0
         start_time = time.time()
+        in_reasoning_mode = False
 
         try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
+            with urllib.request.urlopen(req, timeout=120) as resp:
                 for raw_line in resp:
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line or not line.startswith("data: "):
+                        # Vérifier que le processus serveur est toujours vivant
+                        if self.process and self.process.poll() is not None:
+                            raise RuntimeError("Le processus llama-server a crashé pendant la génération.")
                         continue
 
                     data_str = line[6:].strip()
@@ -326,16 +359,51 @@ class LlamaServer:
                         choices = chunk.get("choices", [])
                         if choices:
                             delta = choices[0].get("delta", {})
-                            content = delta.get("content", "")
+
+                            # Support des tokens de réflexion (llama.cpp b4500+, DeepSeek, Qwen2.5, Gemma)
+                            reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                            if reasoning:
+                                if not in_reasoning_mode:
+                                    in_reasoning_mode = True
+                                    on_token("<think>")
+                                token_count += 1
+                                on_token(reasoning)
+
+                            content = delta.get("content")
                             if content:
+                                if in_reasoning_mode:
+                                    in_reasoning_mode = False
+                                    on_token("</think>")
                                 token_count += 1
                                 full_response.append(content)
                                 on_token(content)
                     except Exception:
                         continue
 
+                # Fermer proprement la balise de réflexion si le flux se termine pendant le raisonnement
+                if in_reasoning_mode:
+                    in_reasoning_mode = False
+                    on_token("</think>")
+
+        except (socket.timeout, TimeoutError):
+            elapsed = time.time() - start_time
+            if token_count == 0:
+                raise RuntimeError(
+                    f"Le serveur n'a produit aucun token en {elapsed:.0f}s. "
+                    "Le modèle est peut-être trop lourd pour la RAM disponible, ou le serveur ne répond pas. "
+                    "Essayez : /stop puis /load"
+                )
         except KeyboardInterrupt:
             raise
+        except urllib.error.HTTPError as e:
+            error_body = ""
+            try:
+                error_body = e.read().decode("utf-8", errors="replace")[:500]
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"Erreur HTTP {e.code} du serveur llama-server : {e.reason}\n{error_body}".strip()
+            )
         except urllib.error.URLError as e:
             raise RuntimeError(f"Connexion au serveur local interrompue : {e}")
 
