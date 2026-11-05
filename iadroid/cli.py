@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
+from rich.markup import escape
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
@@ -25,7 +26,8 @@ from .config import (
     ANDROID_GREEN,
     LLAMA_CLI_PATH,
     ensure_directories,
-    get_ram_info
+    get_ram_info,
+    get_gpu_type
 )
 from .banner import display_welcome_banner, print_help_table
 from .preset_manager import PresetManager, is_llama_running, stop_llama_processes
@@ -40,17 +42,18 @@ class ThinkStreamParser:
     """
     Analyse les tokens en temps réel pour détecter et séparer les blocs <think> ... </think>,
     même si du texte précède la balise ou si le tag est découpé en plusieurs chunks.
-    Gère également l'affichage masqué (show_thinking=False).
+    Gère également l'affichage masqué (show_thinking=False) et le mode désactivé (thinking_enabled=False).
     """
-    def __init__(self, on_think_start, on_think_token, on_think_end, on_response_start, on_response_token, show_thinking=True):
+    def __init__(self, on_think_start, on_think_token, on_think_end, on_response_start, on_response_token, show_thinking=True, thinking_enabled=True):
         self.on_think_start = on_think_start
         self.on_think_token = on_think_token
         self.on_think_end = on_think_end
         self.on_response_start = on_response_start
         self.on_response_token = on_response_token
         self.show_thinking = show_thinking
+        self.thinking_enabled = thinking_enabled
 
-        self.state = "STREAMING"  # STREAMING, IN_THINK
+        self.state = "STREAMING"  # STREAMING, IN_THINK, DISCARD_THINK
         self.buffer = ""
         self.think_tokens_count = 0
         self.response_tokens_count = 0
@@ -68,8 +71,8 @@ class ThinkStreamParser:
                 if "<think>" in self.buffer:
                     idx = self.buffer.find("<think>")
                     before = self.buffer[:idx]
-                    if before:
-                        # Texte avant le <think>
+                    if before and before.strip():
+                        # Vrai texte avant le <think>
                         if not self.response_started:
                             self.response_started = True
                             self.on_response_start()
@@ -77,12 +80,21 @@ class ThinkStreamParser:
                         self.full_response_text.append(before)
                         self.response_tokens_count += len(before.split())
 
-                    self.state = "IN_THINK"
-                    self.had_think = True
-                    self.on_think_start(self.show_thinking)
+                    if self.thinking_enabled:
+                        self.state = "IN_THINK"
+                        self.had_think = True
+                        self.on_think_start(self.show_thinking)
+                    else:
+                        self.state = "DISCARD_THINK"
+
                     self.buffer = self.buffer[idx + 7:]
                     continue
                 else:
+                    # Si la réponse n'a pas encore commencé et que le buffer ne contient que des blancs/sauts de ligne,
+                    # attendre le token suivant pour vérifier s'il s'agit de <think>
+                    if not self.response_started and not self.had_think and not self.buffer.strip():
+                        break
+
                     # Garder au plus 6 caractères qui pourraient être le début de "<think>"
                     possible_start = False
                     for i in range(1, min(7, len(self.buffer) + 1)):
@@ -94,33 +106,33 @@ class ThinkStreamParser:
                         safe_len = len(self.buffer) - 6
                         emit = self.buffer[:safe_len]
                         self.buffer = self.buffer[safe_len:]
-                        if not self.response_started:
-                            self.response_started = True
-                            self.on_response_start()
-                        self.on_response_token(emit)
-                        self.full_response_text.append(emit)
-                        self.response_tokens_count += len(emit.split())
-                        break
                     elif not possible_start:
                         emit = self.buffer
                         self.buffer = ""
-                        if not self.response_started:
-                            self.response_started = True
-                            self.on_response_start()
-                        self.on_response_token(emit)
-                        self.full_response_text.append(emit)
-                        self.response_tokens_count += len(emit.split())
-                        break
                     else:
                         break
+
+                    if not self.response_started:
+                        emit = emit.lstrip("\r\n")
+                        if emit:
+                            self.response_started = True
+                            self.on_response_start()
+                            self.on_response_token(emit)
+                            self.full_response_text.append(emit)
+                            self.response_tokens_count += len(emit.split())
+                    else:
+                        if emit:
+                            self.on_response_token(emit)
+                            self.full_response_text.append(emit)
+                            self.response_tokens_count += len(emit.split())
+                    break
 
             elif self.state == "IN_THINK":
                 if "</think>" in self.buffer:
                     idx = self.buffer.find("</think>")
                     think_part = self.buffer[:idx]
                     if think_part:
-                        if self.show_thinking:
-                            self.on_think_token(think_part)
+                        self.on_think_token(think_part)
                         self.full_think_text.append(think_part)
                         self.think_tokens_count += len(think_part.split())
 
@@ -140,18 +152,37 @@ class ThinkStreamParser:
                         safe_len = len(self.buffer) - 7
                         think_emit = self.buffer[:safe_len]
                         self.buffer = self.buffer[safe_len:]
-                        if self.show_thinking:
-                            self.on_think_token(think_emit)
+                        self.on_think_token(think_emit)
                         self.full_think_text.append(think_emit)
                         self.think_tokens_count += len(think_emit.split())
                         break
                     elif not possible_end:
                         think_emit = self.buffer
                         self.buffer = ""
-                        if self.show_thinking:
-                            self.on_think_token(think_emit)
+                        self.on_think_token(think_emit)
                         self.full_think_text.append(think_emit)
                         self.think_tokens_count += len(think_emit.split())
+                        break
+                    else:
+                        break
+
+            elif self.state == "DISCARD_THINK":
+                if "</think>" in self.buffer:
+                    idx = self.buffer.find("</think>")
+                    self.state = "STREAMING"
+                    self.buffer = self.buffer[idx + 8:].lstrip("\r\n")
+                    continue
+                else:
+                    possible_end = False
+                    for i in range(1, min(8, len(self.buffer) + 1)):
+                        if "</think>".startswith(self.buffer[-i:]):
+                            possible_end = True
+                            break
+                    if possible_end and len(self.buffer) > 7:
+                        self.buffer = self.buffer[-7:]
+                        break
+                    elif not possible_end:
+                        self.buffer = ""
                         break
                     else:
                         break
@@ -159,17 +190,28 @@ class ThinkStreamParser:
     def finish(self):
         if self.buffer:
             if self.state == "IN_THINK":
-                if self.show_thinking:
+                if self.thinking_enabled:
                     self.on_think_token(self.buffer)
-                self.full_think_text.append(self.buffer)
-                self.think_tokens_count += len(self.buffer.split())
-                self.on_think_end(self.think_tokens_count, self.show_thinking)
+                    self.full_think_text.append(self.buffer)
+                    self.think_tokens_count += len(self.buffer.split())
+                    self.on_think_end(self.think_tokens_count, self.show_thinking)
+            elif self.state == "DISCARD_THINK":
+                pass
             else:
+                emit = self.buffer
                 if not self.response_started:
-                    self.response_started = True
-                    self.on_response_start()
-                self.on_response_token(self.buffer)
-                self.full_response_text.append(self.buffer)
+                    emit = emit.lstrip("\r\n")
+                    if emit:
+                        self.response_started = True
+                        self.on_response_start()
+                        self.on_response_token(emit)
+                        self.full_response_text.append(emit)
+                        self.response_tokens_count += len(emit.split())
+                else:
+                    if emit:
+                        self.on_response_token(emit)
+                        self.full_response_text.append(emit)
+                        self.response_tokens_count += len(emit.split())
             self.buffer = ""
 
 class IADroidCompleter(Completer):
@@ -542,7 +584,9 @@ class IADroidCLI:
                 console.print(f"Flash Attention (-fa) : {state} (mode actuel: {dev.upper()})")
                 console.print("[dim]Usage : /fa <on|off>[/dim]")
                 if dev == "gpu":
-                    console.print("[dim yellow]Note : Sur GPU Vulkan mobile (Adreno), Flash Attention fait souvent crasher le pilote.[/dim yellow]")
+                    gpu_name = get_gpu_type()
+                    gpu_str = f" ({gpu_name})" if gpu_name != "Vulkan" else ""
+                    console.print(f"[dim yellow]Note : Sur GPU Vulkan mobile{gpu_str}, Flash Attention fait souvent crasher le pilote.[/dim yellow]")
             else:
                 opt = arg.lower()
                 if opt in ("on", "true", "1", "oui"):
@@ -599,7 +643,7 @@ class IADroidCLI:
                 preset = self.manager.get_active_preset()
                 rs = preset.get("reasoning", {}) if preset else {}
                 curr = rs.get("show_thinking", True)
-                state = "[bold green]activé (ON - visible)[/bold green]" if curr else "[bold yellow]masqué (OFF - masqué)[/bold yellow]"
+                state = "[bold green]activé (ON - aperçu 5 mots)[/bold green]" if curr else "[bold yellow]masqué (OFF - indicateur seul)[/bold yellow]"
                 console.print(f"Affichage de la réflexion : {state}")
                 console.print("[dim]Usage : /show-think <on|off>[/dim]")
             else:
@@ -763,7 +807,8 @@ class IADroidCLI:
 
         # Raisonnement & Thinking
         rs = preset.get("reasoning", {})
-        effort = rs.get("effort", "medium") if rs.get("enabled", True) else "off"
+        thinking_enabled = rs.get("enabled", True) and rs.get("effort", "medium") != "off"
+        effort = rs.get("effort", "medium") if thinking_enabled else "off"
         show_thinking = rs.get("show_thinking", True)
 
         # Construction des messages pour l'API /v1/chat/completions (OpenAI compatible)
@@ -771,9 +816,12 @@ class IADroidCLI:
         full_sys_prompt = sys_prompt
 
         # Si le mode réflexion est activé, guider le modèle vers l'utilisation des balises <think>
-        if effort != "off" and "<think>" not in sys_prompt:
+        if thinking_enabled and "<think>" not in sys_prompt:
             thinking_rule = "Réfléchis étape par étape avant de répondre. Place l'intégralité de ta réflexion interne entre <think> et </think>."
             full_sys_prompt = (sys_prompt + "\n" + thinking_rule).strip() if sys_prompt else thinking_rule
+        elif not thinking_enabled:
+            no_thinking_rule = "Réponds directement et sans préambule. Ne génère aucune balise de réflexion <think> ni de raisonnement interne."
+            full_sys_prompt = (sys_prompt + "\n" + no_thinking_rule).strip() if sys_prompt else no_thinking_rule
 
         if full_sys_prompt:
             messages.append({"role": "system", "content": full_sys_prompt})
@@ -783,37 +831,45 @@ class IADroidCLI:
 
         messages.append({"role": "user", "content": user_prompt})
 
-        # Indicateur de réflexion dynamique
-        spinner = console.status("[dim]💭 Réflexion en cours...[/dim]", spinner="dots")
+        # Indicateur dynamique (réflexion si activée, sinon génération directe)
+        spinner_label = "[dim]💭 Réflexion en cours...[/dim]" if thinking_enabled else "[dim]⚡ Génération en cours...[/dim]"
+        spinner = console.status(spinner_label, spinner="dots")
         spinner.start()
         start_time = time.time()
-        first_token_received = False
         think_start_time = 0
+        accumulated_think_text = ""
 
         def on_think_start(show: bool = True):
-            nonlocal think_start_time
+            nonlocal think_start_time, accumulated_think_text
             think_start_time = time.time()
-            if show:
-                console.print(f"\n[dim]┌─ 💭 [italic]Réflexion[/italic][/dim]")
-                sys.stdout.flush()
+            accumulated_think_text = ""
+            spinner.update("[dim]💭 Réflexion en cours...[/dim]")
 
         def on_think_token(tok: str):
-            console.print(f"[dim italic]{tok}[/dim italic]", end="")
-            sys.stdout.flush()
+            nonlocal accumulated_think_text
+            accumulated_think_text += tok
+            if show_thinking:
+                words = accumulated_think_text.split()
+                if words:
+                    last_5 = words[-5:] if len(words) >= 5 else words
+                    prefix = "... " if len(words) > 5 else ""
+                    preview_str = prefix + " ".join(last_5)
+                    term_w = shutil.get_terminal_size().columns
+                    max_w = max(20, term_w - 6)
+                    if len(preview_str) > max_w:
+                        preview_str = "..." + preview_str[-max_w:]
+                    spinner.update(f"[dim]💭 Réflexion en cours...\n  [italic]{escape(preview_str)}[/italic][/dim]")
+            else:
+                spinner.update("[dim]💭 Réflexion en cours...[/dim]")
 
         def on_think_end(tok_count: int, show: bool = True):
+            spinner.stop()
             t_elapsed = max(0.1, time.time() - (think_start_time or start_time))
-            if show:
-                console.print(f"\n[dim]└─ ✓ Réflexion terminée ({t_elapsed:.1f}s, {tok_count} tokens)[/dim]\n")
-            else:
-                console.print(f"\n[dim]💭 [Réflexion masquée : {tok_count} tokens ({t_elapsed:.1f}s)][/dim]\n")
+            console.print(f"\n[dim]💭 Réfléchi en {t_elapsed:.1f}s[/dim]")
             sys.stdout.flush()
 
         def on_response_start():
-            # Si aucune réflexion via <think> n'a été émise, afficher le temps de calcul / réflexion initial (prefill)
-            if not parser.had_think:
-                prefill_sec = max(0.1, time.time() - start_time)
-                console.print(f"\n[dim]💭 Réfléchi en {prefill_sec:.1f}s[/dim]")
+            spinner.stop()
             console.print(f"\n[bold {ANDROID_GREEN}]>[/bold {ANDROID_GREEN}] ", end="")
             sys.stdout.flush()
 
@@ -827,21 +883,19 @@ class IADroidCLI:
             on_think_end=on_think_end,
             on_response_start=on_response_start,
             on_response_token=on_response_token,
-            show_thinking=show_thinking
+            show_thinking=show_thinking,
+            thinking_enabled=thinking_enabled
         )
 
         def on_raw_token(token: str):
-            nonlocal first_token_received
-            if not first_token_received:
-                first_token_received = True
-                spinner.stop()
             parser.feed(token)
 
         try:
             full_reply, elapsed, gen_tokens = self.server.stream_chat(
                 messages=messages,
                 sampling=preset.get("sampling", {}),
-                on_token=on_raw_token
+                on_token=on_raw_token,
+                reasoning_effort=effort if thinking_enabled else "none"
             )
             parser.finish()
 

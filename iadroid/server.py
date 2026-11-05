@@ -241,12 +241,14 @@ class LlamaServer:
                         console.print("  3. Ou déplacez le modèle .gguf dans le stockage privé de Termux : [bold green]~/.iadroid/models/[/bold green]")
                     elif "createcomputepipeline" in full_log or "vk::" in full_log or "errorunknown" in full_log:
                         gpu_name = get_gpu_type()
-                        console.print(f"\n[bold red]💡 Diagnostic GPU Vulkan ({gpu_name}) :[/bold red]")
-                        console.print(f"  [yellow]Le pilote Vulkan {gpu_name} du smartphone a rejeté la compilation du pipeline de calcul GPU (createComputePipeline).[/yellow]")
+                        gpu_title = f" ({gpu_name})" if gpu_name != "Vulkan" else ""
+                        gpu_driver = f" {gpu_name}" if gpu_name != "Vulkan" else ""
+                        console.print(f"\n[bold red]💡 Diagnostic GPU Vulkan{gpu_title} :[/bold red]")
+                        console.print(f"  [yellow]Le pilote Vulkan{gpu_driver} du smartphone a rejeté la compilation du pipeline de calcul GPU (createComputePipeline).[/yellow]")
                         if "gemma" in os.path.basename(model_path).lower():
                             console.print("  [red]⚠️ Incompatibilité connue : L'architecture Gemma (logit soft-capping / head_dim=256) fait souvent échouer les shaders Vulkan sur GPU mobile.[/red]")
                         console.print("  [cyan]Solutions recommandées :[/cyan]")
-                        console.print("  • Basculer en mode CPU ultra-rapide (très performant sur Snapdragon 8 Gen 3 & Dimensity) : [bold green]/device cpu[/bold green]")
+                        console.print("  • Basculer en mode CPU : [bold green]/device cpu[/bold green]")
                         console.print("  • Désactiver Flash Attention sur GPU : [bold green]/fa off[/bold green]")
                         console.print("  • Décharger moins de couches VRAM : [bold green]/device gpu 15[/bold green]")
             except Exception:
@@ -275,7 +277,8 @@ class LlamaServer:
         self,
         messages: List[Dict[str, str]],
         sampling: Dict[str, Any],
-        on_token: Callable[[str], None]
+        on_token: Callable[[str], None],
+        reasoning_effort: Optional[str] = None
     ) -> Tuple[str, float, int]:
         """
         Envoie une requête de chat au format standard OpenAI /v1/chat/completions
@@ -293,6 +296,9 @@ class LlamaServer:
             "min_p": sampling.get("min_p", 0.05),
             "repeat_penalty": sampling.get("repeat_penalty", 1.1)
         }
+
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
 
         req = urllib.request.Request(
             url,

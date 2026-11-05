@@ -18,7 +18,7 @@
 
 </div>
 
-> ⚡ **Projet propulsé par le Vibe Coding :** Ce projet a été entièrement conçu, architecturé et programmé en mode **Vibe Coding** assisté par Intelligence Artificielle. L'objectif : créer un environnement CLI élégant inspiré de *Claude Code* et *Antigravity*, tout en exploitant au maximum le silicium de votre smartphone (Qualcomm Adreno 750 / Snapdragon 8 Gen 3) via Vulkan 1.4, **100% hors-ligne et sans aucun abonnement**.
+> ⚡ **Projet propulsé par le Vibe Coding :** Ce projet a été entièrement conçu, architecturé et programmé en mode **Vibe Coding** assisté par Intelligence Artificielle. L'objectif : créer un environnement CLI élégant inspiré de *Claude Code* et *Antigravity*, tout en exploitant au maximum le silicium de votre smartphone via Vulkan 1.4, **100% hors-ligne et sans aucun abonnement**.
 
 <details>
 <summary>👾 <i>Afficher la mascotte Bugdroid Pixel-Art du CLI</i></summary>

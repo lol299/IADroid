@@ -70,16 +70,39 @@ def get_ram_info() -> tuple:
 
 def get_gpu_type() -> str:
     """
-    Détecte l'architecture matérielle du GPU sous Android :
-    - 'Adreno' (Qualcomm Snapdragon via /dev/kgsl-3d0)
-    - 'Mali' (MediaTek Dimensity / Samsung Exynos / Google Tensor via /dev/mali0)
+    Détecte avec précision l'architecture matérielle du GPU sous Android :
+    - 'Adreno' (Qualcomm Snapdragon via /dev/kgsl-3d0 ou getprop)
+    - 'Mali' (MediaTek Dimensity / Samsung Exynos / ARM Mali via /dev/mali0 ou getprop)
     - 'Vulkan' (Générique / Autre)
     """
     try:
-        if Path("/dev/kgsl-3d0").exists():
+        # 1. Périphériques matériels directs sous /dev
+        if Path("/dev/kgsl-3d0").exists() or Path("/dev/kgsl-2d0").exists():
             return "Adreno"
-        elif Path("/dev/mali0").exists():
+        if Path("/dev/mali0").exists() or Path("/dev/mali").exists():
             return "Mali"
+
+        # 2. Propriétés système Android (getprop)
+        import subprocess
+        for prop in ["ro.hardware.egl", "ro.hardware.vulkan", "ro.soc.manufacturer", "ro.board.platform", "ro.hardware"]:
+            try:
+                val = subprocess.check_output(["getprop", prop], text=True, stderr=subprocess.DEVNULL, timeout=0.5).strip().lower()
+                if any(k in val for k in ("adreno", "qcom", "qualcomm", "snapdragon")):
+                    return "Adreno"
+                if any(k in val for k in ("mali", "mediatek", "mtk", "dimensity", "immortalis")):
+                    return "Mali"
+            except Exception:
+                pass
+
+        # 3. /proc/cpuinfo
+        try:
+            cpuinfo = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="ignore").lower()
+            if "qualcomm" in cpuinfo or "snapdragon" in cpuinfo:
+                return "Adreno"
+            if "mediatek" in cpuinfo or "mt6" in cpuinfo or "mt8" in cpuinfo or "dimensity" in cpuinfo:
+                return "Mali"
+        except Exception:
+            pass
     except Exception:
         pass
     return "Vulkan"

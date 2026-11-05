@@ -12,7 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.prompt import Prompt
 
-from .config import IADROID_HOME, BIN_DIR, LLAMA_CLI_PATH, ANDROID_GREEN
+from .config import IADROID_HOME, BIN_DIR, LLAMA_CLI_PATH, ANDROID_GREEN, get_gpu_type
 
 console = Console()
 THREADS_FILE = IADROID_HOME / "compile_threads.txt"
@@ -129,21 +129,22 @@ class LlamaBuilder:
                 console.print(f"  [dim]Note lien : {e}[/dim]")
 
         # 3. Détection du type de GPU matériel du smartphone
-        has_adreno = Path("/dev/kgsl-3d0").exists()
-        has_mali = Path("/dev/mali0").exists()
+        detected_gpu = get_gpu_type()
+        has_adreno = Path("/dev/kgsl-3d0").exists() or detected_gpu == "Adreno"
+        has_mali = Path("/dev/mali0").exists() or Path("/dev/mali").exists() or detected_gpu == "Mali"
         turnip_icd = Path(self.prefix) / "share/vulkan/icd.d/freedreno_icd.aarch64.json"
 
         if has_adreno:
-            console.print("• Matériel GPU : [bold green]Qualcomm Adreno détecté (/dev/kgsl-3d0)[/bold green]")
+            console.print("• Matériel GPU : [bold green]Qualcomm Adreno détecté[/bold green]")
             if not turnip_icd.exists():
                 console.print(f"[bold yellow]👉 Pour activer l'accélération matérielle Adreno, installez le pilote Turnip :[/bold yellow]")
                 console.print(f"   [bold cyan]pkg install -y mesa-vulkan-icd-freedreno[/bold cyan]")
             else:
                 console.print("• Pilote Turnip Vulkan (Adreno) : [bold green]Installé et actif[/bold green]")
         elif has_mali:
-            console.print("• Matériel GPU : [bold green]ARM Mali détecté (/dev/mali0)[/bold green]")
+            console.print("• Matériel GPU : [bold green]ARM Mali / MediaTek détecté[/bold green]")
         else:
-            console.print("• Matériel GPU : [dim]Détection via Android HAL[/dim]")
+            console.print("• Matériel GPU : [dim]Détection générique Android HAL (Vulkan)[/dim]")
 
         # 4. Test de vulkaninfo
         console.print("\n[cyan]Analyse des périphériques Vulkan détectés :[/cyan]")
