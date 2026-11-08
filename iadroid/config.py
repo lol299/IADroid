@@ -193,6 +193,22 @@ def get_vulkan_env(base_env: dict = None) -> dict:
         env["LD_LIBRARY_PATH"] = f"/system/lib64:{_termux_prefix() / 'lib'}:{env.get('LD_LIBRARY_PATH', '')}"
     return env
 
+# Sous Turnip, un micro-batch (-ub) > 128 provoque vk::ErrorDeviceLost dès que le contexte
+# dépasse 1024 tokens (charge GPU trop longue, réinitialisée par le noyau). Testé sur Adreno 750.
+TURNIP_MAX_UBATCH = 128
+
+def effective_ubatch(hw: dict) -> tuple:
+    """
+    Retourne (ubatch_effectif, limite_appliquee) pour la section 'hardware' d'un profil.
+    Limite le micro-batch sous Turnip quand des couches tournent sur le GPU.
+    """
+    ub = int(hw.get("ubatch", 128))
+    dev = hw.get("device", "gpu")
+    ngl = hw.get("ngl", 99 if dev == "gpu" else 0)
+    if dev == "gpu" and ngl > 0 and ub > TURNIP_MAX_UBATCH and get_vulkan_driver() == "turnip":
+        return TURNIP_MAX_UBATCH, True
+    return ub, False
+
 def ensure_directories():
     """Crée l'arborescence des dossiers et règle la liaison du pilote GPU Vulkan sous Termux."""
     for d in (PRESETS_DIR, MODELS_DIR, BIN_DIR, LOGS_DIR):

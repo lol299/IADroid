@@ -18,6 +18,7 @@ from .config import (
     LLAMA_CLI_PATH,
     ensure_directories,
     get_default_preset,
+    effective_ubatch,
     ANDROID_GREEN
 )
 
@@ -273,7 +274,7 @@ class PresetManager:
         cmd.extend(["-t", str(threads)])
 
         batch = hw.get("batch", 512)
-        ubatch = hw.get("ubatch", 128)
+        ubatch, _ = effective_ubatch(hw)
         cmd.extend(["-b", str(batch), "-ub", str(ubatch)])
 
         # Flash Attention (on|off explicite pour éviter que le flag suivant soit consommé)
@@ -343,7 +344,7 @@ class PresetManager:
         ngl = hw.get("ngl", 99 if dev == "gpu" else 0)
         cmd.extend(["-ngl", str(ngl)])
         cmd.extend(["-t", str(hw.get("cpu_threads", 4))])
-        cmd.extend(["-b", str(hw.get("batch", 512)), "-ub", str(hw.get("ubatch", 128))])
+        cmd.extend(["-b", str(hw.get("batch", 512)), "-ub", str(effective_ubatch(hw)[0])])
 
         # Flash Attention : Sur GPU Vulkan mobile (Adreno), le shader Flash Attention fait crasher
         # le pilote avec 'createComputePipeline: ErrorUnknown'. On ne l'active sur GPU que si forcé.
@@ -400,7 +401,7 @@ class PresetManager:
         ngl = hw.get("ngl", 99 if dev == "gpu" else 0)
         cmd.extend(["-ngl", str(ngl)])
         cmd.extend(["-t", str(hw.get("cpu_threads", 4))])
-        cmd.extend(["-b", str(hw.get("batch", 512)), "-ub", str(hw.get("ubatch", 128))])
+        cmd.extend(["-b", str(hw.get("batch", 512)), "-ub", str(effective_ubatch(hw)[0])])
 
         # Flash Attention : Sur GPU Vulkan mobile (Adreno), le shader Flash Attention fait crasher
         # le pilote avec 'createComputePipeline: ErrorUnknown'. On ne l'active sur GPU que si forcé.

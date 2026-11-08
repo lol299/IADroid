@@ -147,7 +147,7 @@ Vous arrivez sur l'interface épurée avec la mascotte Bugdroid, la ligne de sai
 | **`/cmake-del-cache`** | | Supprime le cache de build CMake pour repartir sur une installation propre. |
 | **`/llama-cli`** | | Lance une session brute interactive avec `llama-cli` (mode expert / débug). |
 | **`/help`** | | Affiche le tableau complet des commandes. |
-| **`/clear`** | | Nettoie l'écran et réaffiche la bannière d'accueil d'IADroid. |
+| **`/clear`** | | Démarre une nouvelle conversation : efface l'écran et réinitialise le contexte du modèle. |
 | **`/exit`** *(ou `/quit`)* | | Arrête les processus actifs et quitte IADroid. |
 
 ---
@@ -200,7 +200,7 @@ Sur les SoC équipés d'un GPU **ARM Mali / Immortalis**, IADroid détecte autom
 Pour tirer le maximum de bande passante et de tokens/seconde de votre smartphone :
 
 1. **Cache KV en `f16` :** Avec la bande passante LPDDR5X (~77 Go/s) des processeurs récents, `f16` calcule directement sans le coût de déquantification continue de `q4_0`.
-2. **Micro-batch (-ub) :** Réglez `-ub 256` ou `-ub 512` pour saturer tous les cœurs de calcul du GPU.
+2. **Micro-batch (-ub) :** Sous Turnip (Adreno), IADroid limite automatiquement `-ub` à `128` : au-delà, le GPU est réinitialisé (`ErrorDeviceLost`) dès que la conversation dépasse 1024 tokens.
 3. **Threads CPU (-t) :** Réglez `-t 4` (ou `-t 2`) avec déchargement GPU complet (`-ngl 99`). Évitez de saturer tous les cœurs CPU pour ne pas entrer en compétition avec le GPU sur le bus mémoire.
 4. **Optimisation Turnip (`/boost-gpu`) :** Active le mode `TU_DEBUG=noconform` et le mode de présentation `mailbox` à latence minimale.
 

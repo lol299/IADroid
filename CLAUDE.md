@@ -59,6 +59,12 @@ Pour publier : mettre `__version__` à jour dans `iadroid/version.py`, faire un 
   - on peut forcer le choix avec `IADROID_VULKAN=turnip|system`.
 
   Le pilote Qualcomm d'origine plante (`createComputePipeline: ErrorUnknown` sur `mul_mat_vec_q4_k`), comme vérifié sur Adreno 750. Turnip fonctionne. Pour savoir quel pilote est actif : `llama-server --list-devices` affiche `Turnip Adreno (TM) 750` avec Turnip, et `Adreno (TM) 750` avec le pilote Qualcomm.
+- **Turnip et contexte au-delà de 1024 tokens** (problème vérifié sur Adreno 750), deux causes distinctes :
+  1. llama.cpp passe à un shader softmax `*_wg512`, que Turnip refuse (`MESA: error: ... impossible to have enough concurrent waves`), et le serveur meurt pendant la génération. Correctif source dans `scripts/patch_llama.sh` : idempotent, retiré avant chaque `git pull` puis réappliqué, utilisé par `build_llama.sh` et `LlamaBuilder.recompile()`. `/check-gpu` indique s'il est présent.
+  2. Un `-ub` supérieur à 128 provoque `vk::ErrorDeviceLost` : le GPU est réinitialisé par le noyau. `config.effective_ubatch()` limite donc `-ub` à 128 sous Turnip.
+- Le GPU du REDMAGIC 9S Pro de l'utilisateur est plafonné par REDMAGIC OS, pas par IADroid :
+  - à 578 MHz en dehors du Game Space ;
+  - par une protection thermique après un pic vers 85 °C, qui ne se relâche pas même quand le GPU redescend à 60 °C.
 - `stop_llama_processes()` fait `pkill -f "llama-"`. Il tue aussi toute commande shell dont le texte contient « llama- », par exemple une commande SSH de test : en tenir compte quand on teste à distance.
 - `updater.py` : `/update` fait un `git pull --ff-only` sur `lol299/IADroid@main`. En cas d'échec, il fait `git stash`, puis **`git reset --hard origin/main`**. Le dépôt cloné sur le téléphone ne doit donc pas contenir de modifications locales.
 - `crash_handler.py` : `handle_crash()` écrit un rapport dans `/sdcard/Download/` et l'affiche. Il est branché sur `sys.excepthook` dans `iadroid.py` et sur la boucle REPL.

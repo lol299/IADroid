@@ -4,6 +4,7 @@ Style Claude Code & Antigravity CLI (agy) avec barre de commandes et autocomplé
 """
 
 import os
+import re
 import sys
 import time
 import shutil
@@ -13,6 +14,10 @@ from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 from rich.markup import escape
+from rich.text import Text
+from rich.live import Live
+from rich.console import Group
+from rich.spinner import Spinner
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
@@ -37,6 +42,140 @@ from .server import LlamaServer
 from .crash_handler import handle_crash
 
 console = Console()
+
+class LiveFooterView:
+    """
+    Zone dynamique ancrée en bas de l'écran pendant le chargement et la génération :
+      [indicateur animé (réflexion / chargement)]
+      [ligne de réponse en cours d'écriture]
+      [barre de prompt grisée + barre d'état en direct (t/s, contexte, RAM)]
+    Les lignes de réponse terminées et les messages (console.print) s'impriment
+    au-dessus de la zone, qui reste visible jusqu'à stop().
+    """
+    def __init__(self, footer_fn):
+        self.footer_fn = footer_fn   # () -> renderable rich (barre de prompt + barre d'état)
+        self.spinner = Spinner("dots", style="dim")
+        self.header = None           # texte (markup rich) de l'indicateur, ou None
+        self.partial = Text()        # ligne de réponse pas encore terminée
+        self.live = None
+
+    def __rich__(self):
+        items = []
+        if self.header:
+            self.spinner.update(text=Text.from_markup(self.header))
+            items.append(self.spinner)
+        partial = self.partial
+        if partial.plain:
+            items.append(partial)
+        items.append(self.footer_fn())
+        return Group(*items)
+
+    def start(self):
+        if self.live is None:
+            self.live = Live(self, console=console, refresh_per_second=4, transient=True)
+            self.live.start()
+
+    def set_header(self, markup):
+        self.header = markup
+
+    def write(self, text: str, style: str = ""):
+        """Ajoute du texte de réponse : les lignes complètes passent au-dessus de la zone."""
+        parts = text.split("\n")
+        for i, part in enumerate(parts):
+            if i > 0:
+                console.print(self.partial)
+                self.partial = Text()
+            if part:
+                new = self.partial.copy()  # nouvel objet : le thread de rafraîchissement lit une ligne cohérente
+                new.append(part, style=style)
+                self.partial = new
+
+    def stop(self):
+        if self.partial.plain:
+            console.print(self.partial)
+            self.partial = Text()
+        self.header = None
+        if self.live is not None:
+            self.live.stop()
+            self.live = None
+
+
+class MarkdownStreamRenderer:
+    """
+    Affiche la réponse en streaming en convertissant le gras markdown (**texte**)
+    en texte gras coloré, même si les ** sont découpés entre deux tokens.
+    sink(texte, style) reçoit les morceaux à afficher.
+    """
+    BOLD_STYLE = "bold #00D8D6"
+
+    def __init__(self, sink):
+        self.sink = sink
+        self.bold = False
+        self.pending = ""
+
+    def feed(self, token: str):
+        s = self.pending + token
+        self.pending = ""
+        # Un '*' isolé en fin de token peut être la moitié d'un '**' : on attend la suite
+        if s.endswith("*") and not s.endswith("**"):
+            self.pending = "*"
+            s = s[:-1]
+        parts = s.split("**")
+        for i, part in enumerate(parts):
+            if i > 0:
+                self.bold = not self.bold
+            if part:
+                self.sink(part, self.BOLD_STYLE if self.bold else "")
+
+    def finish(self):
+        if self.pending:
+            self.sink(self.pending, "")
+            self.pending = ""
+        self.bold = False
+
+
+class ThinkStepTracker:
+    """
+    Extrait en streaming les titres d'étape de la réflexion du modèle pour en afficher
+    un sommaire (ex: « Recherche de l'erreur » → « Erreur trouvée » → « Correction »).
+    Une ligne est considérée comme un titre si elle est :
+      - un titre markdown            : ## Titre
+      - en gras en début de ligne    : **Titre**  /  1. **Titre :** suite...
+      - une étape explicite          : Étape : titre.  /  Step 2 - titre
+    Les puces en gras (« * **Langue :** ... ») sont ignorées : ce sont des détails.
+    """
+    _PATTERNS = [
+        re.compile(r"^\s*#{1,4}\s+(.+?)\s*$"),
+        re.compile(r"^\s*(?:\d+[.)]\s*)?\*\*(.+?)\*\*"),
+        re.compile(r"^\s*(?:Étape|Etape|Step)\s*\d*\s*[:\-–]\s*([^.!?\n]+)", re.IGNORECASE),
+    ]
+
+    def __init__(self):
+        self.partial = ""
+        self.steps = []
+
+    def feed(self, text: str) -> list:
+        """Ajoute du texte de réflexion ; retourne les nouveaux titres détectés (lignes complètes)."""
+        self.partial += text
+        new_steps = []
+        while "\n" in self.partial:
+            line, self.partial = self.partial.split("\n", 1)
+            title = self._title(line)
+            if title and (not self.steps or self.steps[-1] != title):
+                self.steps.append(title)
+                new_steps.append(title)
+        return new_steps
+
+    @classmethod
+    def _title(cls, line: str):
+        for pattern in cls._PATTERNS:
+            m = pattern.match(line)
+            if m:
+                title = m.group(1).strip().strip("*").strip().rstrip(":").strip()
+                if 2 <= len(title) <= 80:
+                    return title[:60]
+        return None
+
 
 class ThinkStreamParser:
     """
@@ -338,6 +477,7 @@ class IADroidCLI:
         self.last_speed = "--"
         self._last_status_check = 0.0
         self._cached_server_status = "stopped"
+        self._live = None  # métriques en direct pendant chargement/génération (render_live_footer)
         
         # Instantané des métriques affichées dans la barre d'état.
         # Mis à jour par un thread de fond qui ne redessine l'écran QUE si une valeur
@@ -501,6 +641,80 @@ class IADroidCLI:
             )
             return HTML(f"{line_border}\n{line_metrics}\n{line_info}")
 
+    def render_live_footer(self):
+        """
+        Version rich de la barre de prompt + barre d'état, affichée pendant le chargement
+        et la génération (LiveFooterView). Les valeurs viennent de self._live :
+          {"status": "loading"|"generating", "t0": début, "tokens": n, "first_tok": t, "ctx_base": n}
+        """
+        live = self._live or {}
+        term_width = shutil.get_terminal_size().columns
+        width = max(10, min(term_width - 1, 100))
+        sep = f"[#555555]{'─' * width}[/]"
+        now = time.time()
+
+        preset = self.manager.get_active_preset() or {}
+        rs = preset.get("reasoning", {})
+        effort = rs.get("effort", "medium") if rs.get("enabled", True) else "off"
+        effort_color = "#3DDC84" if effort in ("high", "xhigh") else ("#FFD32A" if effort in ("medium", "low", "minimal") else "#777777")
+        tag = f"● {effort} · /effort"
+        effort_line = f"{' ' * max(0, width - len(tag))}[bold {effort_color}]● {escape(effort)}[/][#777777] · /effort[/]"
+
+        status = live.get("status")
+        elapsed = int(now - live.get("t0", now))
+        if status == "loading":
+            prompt_hint = f"[#777777]chargement du modèle… ({elapsed}s)[/]"
+            badge = f"[bold #FFD32A]⏳ Chargement {elapsed}s[/]"
+        else:
+            prompt_hint = "[#777777]génération en cours… (Ctrl+C pour interrompre)[/]"
+            badge = "[bold #00D8D6]● Génération[/]"
+
+        # Vitesse en direct : tokens reçus depuis le premier token
+        tokens = live.get("tokens", 0)
+        first = live.get("first_tok")
+        if status == "generating" and first and tokens > 1 and now - first > 0.5:
+            speed_str = f"{tokens / (now - first):.1f} t/s"
+        else:
+            speed_str = f"{self.last_speed} t/s" if self.last_speed != "--" else "-- t/s"
+
+        ctx_total = preset.get("context", {}).get("ctx_size", 4096)
+        used = live.get("ctx_base", self.context_tokens_used) + (tokens if status == "generating" else 0)
+        pct = min(100.0, used / max(1, ctx_total) * 100)
+        ctx_color = "#FF5555" if pct >= 90 else ("#FFD32A" if pct >= 75 else "#3DDC84")
+
+        used_ram, total_ram, ram_pct, free_ram = get_ram_info()
+        ram_color = "#FF5555" if ram_pct >= 85 else ("#FFD32A" if ram_pct >= 70 else "#3DDC84")
+        ram = (f"[#FFA500]💾[/] [#CCCCCC]RAM: [/][bold {ram_color}]{used_ram:.1f}G ({ram_pct:.0f}%)[/]"
+               f"[#888888]/{total_ram:.1f}G[/] [#555555]|[/] [#888888]Rest: [/][bold #FFFFFF]{free_ram:.1f}G[/]")
+
+        metrics = (f" [#FFA500]⚡[/] [bold #00D8D6]{speed_str}[/] [#555555]|[/] "
+                   f"[#FF79C6]🧠[/] [#CCCCCC]Ctx: [/][bold #FFFFFF]{used}/{ctx_total}[/] [bold {ctx_color}]({pct:.1f}%)[/]")
+        p_name = escape(preset.get("name", "Inconnu"))
+        dev = preset.get("hardware", {}).get("device", "gpu").upper()
+        dev_color = "#3DDC84" if dev == "GPU" else "#FFD32A"
+        info = (f" [bold #FFD32A]❯❯[/] [#888888]Profil: [/][bold #00D8D6]{p_name}[/] "
+                f"[#555555]·[/] [bold {dev_color}]{dev}[/]")
+
+        if width < 75:
+            lines = [f"{metrics} [#555555]|[/] {badge}", f" {ram}", info]
+        else:
+            lines = [f"{metrics} [#555555]|[/] {ram} [#555555]|[/] {badge}", info]
+
+        return Text.from_markup("\n".join([effort_line, sep, f"[bold #3DDC84]>[/] {prompt_hint}", sep] + lines))
+
+    def _start_server_live(self, preset) -> bool:
+        """Démarre llama-server en gardant la barre d'état visible (temps de chargement, RAM en direct)."""
+        self._live = {"status": "loading", "t0": time.time()}
+        view = LiveFooterView(self.render_live_footer)
+        view.set_header("[bold cyan]Chargement du modèle en VRAM...[/bold cyan]")
+        view.start()
+        try:
+            return self.server.start(preset, progress=view.set_header)
+        finally:
+            view.stop()
+            self._live = None
+            self._last_status_check = 0.0
+
     def _status_monitor_loop(self):
         """
         Surveille RAM et statut serveur en arrière-plan pendant la saisie.
@@ -534,6 +748,14 @@ class IADroidCLI:
             except Exception:
                 pass
 
+    def reset_conversation(self):
+        """Oublie l'historique de la conversation (contexte envoyé au modèle) et remet les compteurs à zéro."""
+        self.conversation_history.clear()
+        active_preset = self.manager.get_active_preset()
+        sys_p = active_preset.get("context", {}).get("system_prompt", "") if active_preset else ""
+        self.context_tokens_used = int(len(sys_p.split()) * 1.3)
+        self.last_speed = "--"
+
     def handle_command(self, user_input: str) -> bool:
         """Exécute une commande utilisateur. Retourne False pour quitter."""
         raw = user_input.strip()
@@ -557,8 +779,13 @@ class IADroidCLI:
 
         # /clear
         elif cmd in ("/clear", "clear"):
+            # Nouvelle conversation : écran + historique de défilement + contexte du modèle
+            self.reset_conversation()
             os.system("clear" if os.name != "nt" else "cls")
+            sys.stdout.write("\033[3J")  # efface aussi l'historique de défilement du terminal
+            sys.stdout.flush()
             display_welcome_banner(self.manager.get_active_preset())
+            console.print(f"[dim]✓ Nouvelle conversation (contexte réinitialisé).[/dim]")
             return True
 
         # /create-preset
@@ -608,7 +835,7 @@ class IADroidCLI:
                     self.manager.set_device_mode(active_name, mode, ngl=ngl_val)
                     if self.server.is_ready():
                         console.print(f"[cyan]Redémarrage du modèle en mode {mode.upper()}...[/cyan]")
-                        self.server.start(self.manager.get_active_preset())
+                        self._start_server_live(self.manager.get_active_preset())
                         self._last_status_check = 0.0
             return True
 
@@ -728,7 +955,7 @@ class IADroidCLI:
             self.last_speed = "--"
 
             console.print(f"\n[bold {ANDROID_GREEN}]⚡ Chargement du profil '{target}' avec llama-server...[/bold {ANDROID_GREEN}]")
-            success = self.server.start(preset)
+            success = self._start_server_live(preset)
             self._last_status_check = 0.0
             if success:
                 console.print(f"[bold {ANDROID_GREEN}]✓ Modèle '{target}' prêt ! Posez votre question directement ci-dessous au prompt >[/bold {ANDROID_GREEN}]\n")
@@ -742,7 +969,7 @@ class IADroidCLI:
                 return True
             p_name = preset.get("name", "inconnu")
             console.print(f"\n[bold {ANDROID_GREEN}]⚡ Démarrage du profil '{p_name}' avec llama-server...[/bold {ANDROID_GREEN}]")
-            success = self.server.start(preset)
+            success = self._start_server_live(preset)
             self._last_status_check = 0.0
             if success:
                 console.print(f"[bold {ANDROID_GREEN}]✓ Modèle '{p_name}' chargé et prêt en mémoire ![/bold {ANDROID_GREEN}]")
@@ -758,11 +985,7 @@ class IADroidCLI:
 
         # /reset : Réinitialiser la conversation
         elif cmd == "/reset":
-            self.conversation_history.clear()
-            active_preset = self.manager.get_active_preset()
-            sys_p = active_preset.get("context", {}).get("system_prompt", "") if active_preset else ""
-            self.context_tokens_used = int(len(sys_p.split()) * 1.3)
-            self.last_speed = "--"
+            self.reset_conversation()
             console.print(f"[bold {ANDROID_GREEN}]✓ Contexte de la conversation réinitialisé.[/bold {ANDROID_GREEN}]")
             return True
 
@@ -841,7 +1064,7 @@ class IADroidCLI:
         # Si le serveur n'est pas encore prêt, le démarrer automatiquement
         if not self.server.is_ready():
             console.print("[cyan]⚡ Démarrage automatique de llama-server en mémoire...[/cyan]")
-            success = self.server.start(preset)
+            success = self._start_server_live(preset)
             self._last_status_check = 0.0
             if not success:
                 return
@@ -861,13 +1084,12 @@ class IADroidCLI:
         messages = []
         full_sys_prompt = sys_prompt
 
-        # Si le mode réflexion est activé, guider le modèle vers l'utilisation des balises <think>
-        if thinking_enabled and "<think>" not in sys_prompt:
-            thinking_rule = "Réfléchis étape par étape avant de répondre. Place l'intégralité de ta réflexion interne entre <think> et </think>."
-            full_sys_prompt = (sys_prompt + "\n" + thinking_rule).strip() if sys_prompt else thinking_rule
-        elif not thinking_enabled:
-            no_thinking_rule = "Réponds directement et sans préambule. Ne génère aucune balise de réflexion <think> ni de raisonnement interne."
-            full_sys_prompt = (sys_prompt + "\n" + no_thinking_rule).strip() if sys_prompt else no_thinking_rule
+        # La réflexion est pilotée uniquement par chat_template_kwargs.enable_thinking
+        # (server.stream_chat). Ne rien ajouter au prompt système à ce sujet :
+        # - citer <think>/</think> : le modèle recopie la balise et llama-server coupe la réflexion dessus ;
+        # - demander des titres d'étape : le modèle les écrit dans la RÉPONSE et alterne
+        #   réflexion/réponse (testé sur Qwen3.5-9B). Le sommaire (ThinkStepTracker) s'appuie
+        #   sur les titres que le modèle produit naturellement (« 1. **Analyze the Request:** »).
 
         if full_sys_prompt:
             messages.append({"role": "system", "content": full_sys_prompt})
@@ -877,57 +1099,80 @@ class IADroidCLI:
 
         messages.append({"role": "user", "content": user_prompt})
 
-        # Indicateur dynamique (réflexion si activée, sinon génération directe)
-        spinner_label = "[dim]💭 Réflexion en cours...[/dim]" if thinking_enabled else "[dim]⚡ Génération en cours...[/dim]"
-        spinner = console.status(spinner_label, spinner="dots")
-        spinner.start()
+        # Zone dynamique en bas d'écran : indicateur + réponse en cours + barre d'état en direct
+        user_tokens = int(len(user_prompt.split()) * 1.3)
+        self._live = {"status": "generating", "t0": time.time(), "tokens": 0, "first_tok": None,
+                      "ctx_base": self.context_tokens_used + user_tokens}
+        view = LiveFooterView(self.render_live_footer)
+        view.set_header("[dim]💭 Réflexion en cours...[/dim]" if thinking_enabled else "[dim]⚡ Génération en cours...[/dim]")
+        view.start()
         start_time = time.time()
         think_start_time = 0
         accumulated_think_text = ""
 
+        PREVIEW_WORDS = 15  # mots de réflexion visibles en direct (/show-think on)
+        step_tracker = ThinkStepTracker()
+        current_step = None
+
         def on_think_start(show: bool = True):
-            nonlocal think_start_time, accumulated_think_text
+            nonlocal think_start_time, accumulated_think_text, current_step, step_tracker
             think_start_time = time.time()
             accumulated_think_text = ""
+            step_tracker = ThinkStepTracker()
+            current_step = None
             if thinking_enabled:
-                spinner.update("[dim]💭 Réflexion en cours...[/dim]")
+                view.set_header("[dim]💭 Réflexion en cours...[/dim]")
             else:
-                spinner.update("[dim]💭 Le modèle réfléchit malgré /think off (masqué)...[/dim]")
+                view.set_header("[dim]💭 Le modèle réfléchit malgré /think off (masqué)...[/dim]")
 
         def on_think_token(tok: str):
-            nonlocal accumulated_think_text
+            nonlocal accumulated_think_text, current_step
             accumulated_think_text += tok
+
+            # Sommaire : chaque nouvelle étape fait passer la précédente en « terminée »
+            for step in step_tracker.feed(tok):
+                if current_step:
+                    console.print(f"  [dim]✓ {escape(current_step)}[/dim]")
+                current_step = step
+
+            header = f"💭 {escape(current_step)}..." if current_step else "💭 Réflexion en cours..."
             if show_thinking:
-                words = accumulated_think_text.split()
+                words = accumulated_think_text.replace("**", "").replace("#", "").split()
                 if words:
-                    last_5 = words[-5:] if len(words) >= 5 else words
-                    prefix = "... " if len(words) > 5 else ""
-                    preview_str = prefix + " ".join(last_5)
+                    shown = words[-PREVIEW_WORDS:]
+                    prefix = "... " if len(words) > PREVIEW_WORDS else ""
+                    preview_str = prefix + " ".join(shown)
                     term_w = shutil.get_terminal_size().columns
-                    max_w = max(20, term_w - 6)
+                    max_w = max(40, (term_w - 6) * 2)  # au plus ~2 lignes
                     if len(preview_str) > max_w:
                         preview_str = "..." + preview_str[-max_w:]
-                    spinner.update(f"[dim]💭 Réflexion en cours...\n  [italic]{escape(preview_str)}[/italic][/dim]")
-            else:
-                spinner.update("[dim]💭 Réflexion en cours...[/dim]")
+                    view.set_header(f"[dim]{header}\n  [italic]{escape(preview_str)}[/italic][/dim]")
+                    return
+            view.set_header(f"[dim]{header}[/dim]")
 
         def on_think_end(tok_count: int, show: bool = True):
-            spinner.stop()
+            view.set_header(None)
+            if current_step:
+                console.print(f"  [dim]✓ {escape(current_step)}[/dim]")
             t_elapsed = max(0.1, time.time() - (think_start_time or start_time))
+            n_steps = len(step_tracker.steps)
+            steps_str = f" · {n_steps} étape{'s' if n_steps > 1 else ''}" if n_steps else ""
             if thinking_enabled:
-                console.print(f"\n[dim]💭 Réfléchi en {t_elapsed:.1f}s[/dim]")
+                console.print(f"\n[dim]💭 Réfléchi en {t_elapsed:.1f}s{steps_str}[/dim]")
             else:
                 console.print(f"\n[dim]💭 Réfléchi en {t_elapsed:.1f}s [yellow](ce modèle ignore /think off)[/yellow][/dim]")
             sys.stdout.flush()
 
         def on_response_start():
-            spinner.stop()
-            console.print(f"\n[bold {ANDROID_GREEN}]>[/bold {ANDROID_GREEN}] ", end="")
-            sys.stdout.flush()
+            view.set_header(None)
+            view.write("\n")
+            view.write("> ", style=f"bold {ANDROID_GREEN}")
+
+        # Texte du modèle affiché via Text() : jamais interprété comme du balisage rich ([...])
+        md_renderer = MarkdownStreamRenderer(view.write)
 
         def on_response_token(tok: str):
-            console.print(tok, end="")
-            sys.stdout.flush()
+            md_renderer.feed(tok)
 
         parser = ThinkStreamParser(
             on_think_start=on_think_start,
@@ -940,6 +1185,11 @@ class IADroidCLI:
         )
 
         def on_raw_token(token: str):
+            live = self._live
+            if live is not None and token not in ("<think>", "</think>"):
+                if live["first_tok"] is None:
+                    live["first_tok"] = time.time()
+                live["tokens"] += 1
             parser.feed(token)
 
         try:
@@ -951,6 +1201,7 @@ class IADroidCLI:
                 thinking_enabled=thinking_enabled
             )
             parser.finish()
+            md_renderer.finish()
 
             clean_reply = "".join(parser.full_response_text).strip()
             if not clean_reply and full_reply:
@@ -959,25 +1210,32 @@ class IADroidCLI:
             self.conversation_history.append(("user", user_prompt))
             self.conversation_history.append(("assistant", clean_reply))
 
-            user_tokens = int(len(user_prompt.split()) * 1.3)
             tokens_count = max(1, gen_tokens if gen_tokens > 0 else int(len(clean_reply.split()) * 1.3))
             self.context_tokens_used += user_tokens + tokens_count
 
-            if elapsed > 0.05:
-                self.last_speed = str(round(tokens_count / elapsed, 1))
+            # Vitesse de génération mesurée depuis le premier token (hors traitement du prompt)
+            first_tok = self._live.get("first_tok") if self._live else None
+            gen_time = (time.time() - first_tok) if first_tok else elapsed
+            if gen_time > 0.05:
+                self.last_speed = str(round(tokens_count / gen_time, 1))
 
+            view.stop()
             console.print()
 
         except KeyboardInterrupt:
+            view.stop()
             console.print("\n[yellow]Génération interrompue par l'utilisateur (Ctrl+C).[/yellow]\n")
         except RuntimeError as e:
-            spinner.stop()
-            console.print(f"\n[red]✗ {e}[/red]")
+            view.stop()
+            console.print(f"\n[red]✗ {escape(str(e))}[/red]")
             console.print("[yellow]Conseil : tapez /stop puis /load pour redémarrer le serveur.[/yellow]\n")
         except Exception as e:
-            console.print(f"\n[red]Erreur lors de la génération : {e}[/red]\n")
+            view.stop()
+            console.print(f"\n[red]Erreur lors de la génération : {escape(str(e))}[/red]\n")
         finally:
-            spinner.stop()
+            view.stop()
+            self._live = None
+            self._last_status_check = 0.0
 
     def run_raw_llama_cli(self):
         """Lance llama-cli en mode brut interactif plein écran (expert/debug)."""

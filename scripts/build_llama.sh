@@ -66,10 +66,14 @@ if [ ! -d "$SRC_DIR/.git" ]; then
 else
     echo -e "${CYAN}[1/4]${NC} Dépôt existant détecté. Mise à jour..."
     cd "$SRC_DIR"
+    bash "$(dirname "$0")/patch_llama.sh" "$SRC_DIR" revert
     git pull || true
 fi
 
 cd "$SRC_DIR"
+
+# Correctifs IADroid sur les sources llama.cpp (voir scripts/patch_llama.sh)
+bash "$(dirname "$0")/patch_llama.sh" "$SRC_DIR"
 
 # 2. Nettoyage si demandé
 if [ $FORCE_REBUILD -eq 1 ] && [ -d "build" ]; then

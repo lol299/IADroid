@@ -9,6 +9,7 @@ import sys
 import json
 import time
 import socket
+import http.client
 import subprocess
 import urllib.request
 import urllib.error
@@ -23,7 +24,8 @@ from .config import (
     ANDROID_GREEN,
     get_gpu_type,
     get_vulkan_env,
-    get_vulkan_driver
+    get_vulkan_driver,
+    effective_ubatch
 )
 from .preset_manager import is_llama_running, stop_llama_processes
 
@@ -78,7 +80,8 @@ class LlamaServer:
     def is_ready(self) -> bool:
         return self.get_status() == "ready"
 
-    def start(self, preset_data: Dict[str, Any], verbose: bool = True) -> bool:
+    def start(self, preset_data: Dict[str, Any], verbose: bool = True,
+              progress: Optional[Callable[[str], None]] = None) -> bool:
         """
         Démarre llama-server en arrière-plan avec la configuration du profil.
         Attend que le modèle soit entièrement chargé en VRAM/RAM avant de rendre la main.
@@ -151,7 +154,10 @@ class LlamaServer:
         ngl = hw.get("ngl", 99 if dev == "gpu" else 0)
         cmd.extend(["-ngl", str(ngl)])
         cmd.extend(["-t", str(hw.get("cpu_threads", 4))])
-        cmd.extend(["-b", str(hw.get("batch", 512)), "-ub", str(hw.get("ubatch", 128))])
+        ubatch, ub_clamped = effective_ubatch(hw)
+        cmd.extend(["-b", str(hw.get("batch", 512)), "-ub", str(ubatch)])
+        if ub_clamped and verbose:
+            console.print(f"[dim]ℹ Micro-batch limité à {ubatch} (au lieu de {hw.get('ubatch')}) : au-delà, le GPU plante sous Turnip quand la conversation dépasse 1024 tokens.[/dim]")
 
         # Flash Attention : Sur GPU Vulkan mobile (Adreno), -fa on fait crasher le pilote avec 'createComputePipeline: ErrorUnknown'
         use_fa = hw.get("gpu_flash_attention", False) if dev == "gpu" else hw.get("flash_attention", True)
@@ -209,14 +215,21 @@ class LlamaServer:
         start_t = time.time()
         ready = False
 
-        with console.status(f"[bold cyan]Chargement du modèle en VRAM...[/bold cyan]", spinner="dots") as load_status:
+        # progress(texte) : affichage fourni par l'appelant (ex: barre d'état en direct du CLI) ;
+        # à défaut, indicateur rich autonome.
+        own_status = None
+        if progress is None:
+            own_status = console.status("[bold cyan]Chargement du modèle en VRAM...[/bold cyan]", spinner="dots")
+            own_status.start()
+            progress = own_status.update
+        try:
             while time.time() - start_t < max_wait:
                 # Référence locale : get_status() peut remettre self.process à None
                 if proc.poll() is not None:
                     break
 
                 elapsed = int(time.time() - start_t)
-                load_status.update(f"[bold cyan]Chargement du modèle en VRAM... {elapsed}s[/bold cyan]")
+                progress(f"[bold cyan]Chargement du modèle en VRAM... {elapsed}s[/bold cyan]")
 
                 status = self.get_status()
                 if status == "ready":
@@ -224,6 +237,9 @@ class LlamaServer:
                     break
 
                 time.sleep(0.5)
+        finally:
+            if own_status is not None:
+                own_status.stop()
 
         if ready:
             self.active_preset_name = p_name
@@ -346,6 +362,7 @@ class LlamaServer:
         token_count = 0
         start_time = time.time()
         in_reasoning_mode = False
+        got_done = False
 
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
@@ -360,6 +377,7 @@ class LlamaServer:
 
                     data_str = line[6:].strip()
                     if data_str == "[DONE]":
+                        got_done = True
                         break
 
                     try:
@@ -393,6 +411,9 @@ class LlamaServer:
                     in_reasoning_mode = False
                     on_token("</think>")
 
+        except (http.client.IncompleteRead, ConnectionError) as e:
+            # Connexion coupée en plein flux : presque toujours un arrêt brutal de llama-server
+            raise RuntimeError(self._interrupted_stream_message(token_count, e))
         except (socket.timeout, TimeoutError):
             elapsed = time.time() - start_time
             if token_count == 0:
@@ -415,5 +436,39 @@ class LlamaServer:
         except urllib.error.URLError as e:
             raise RuntimeError(f"Connexion au serveur local interrompue : {e}")
 
+        # Flux terminé sans [DONE] : le serveur s'est arrêté en pleine génération
+        if not got_done:
+            raise RuntimeError(self._interrupted_stream_message(token_count))
+
         elapsed = max(0.01, time.time() - start_time)
         return "".join(full_response), elapsed, token_count
+
+    def _interrupted_stream_message(self, token_count: int, exc: Exception = None) -> str:
+        """Construit un message d'erreur clair quand la génération est coupée, avec la cause trouvée dans les logs."""
+        time.sleep(0.5)  # laisser le processus finir de mourir
+        proc = self.process
+        dead = proc is not None and proc.poll() is not None
+        msg = (
+            f"La génération s'est arrêtée brutalement après {token_count} tokens"
+            + (f" (llama-server s'est fermé, code {proc.returncode})." if dead else ".")
+        )
+        cause = self._last_log_error()
+        if cause:
+            msg += f"\nDernière erreur du serveur : {cause}"
+        if exc is not None and not cause:
+            msg += f"\nDétail : {exc}"
+        msg += f"\nLogs complets : {self.log_file}"
+        return msg
+
+    def _last_log_error(self) -> Optional[str]:
+        """Retourne la dernière ligne d'erreur significative du log llama-server, ou None."""
+        try:
+            lines = self.log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+        except Exception:
+            return None
+        keys = ("error", "mesa", "abort", "terminat", "exception", "vk::", "failed", "out of memory")
+        for line in reversed(lines):
+            low = line.lower()
+            if any(k in low for k in keys) and "unused tensor" not in low:
+                return line.strip()[:300]
+        return None

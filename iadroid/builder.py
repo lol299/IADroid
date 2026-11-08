@@ -186,7 +186,77 @@ class LlamaBuilder:
         freq = self.get_gpu_freq()
         console.print(f"• Fréquence matérielle GPU : [bold yellow]{freq}[/bold yellow]")
 
+        # Correctif IADroid des sources llama.cpp (contextes > 1024 tokens sous Turnip)
+        vk_src = self.src_dir / "ggml" / "src" / "ggml-vulkan" / "ggml-vulkan.cpp"
+        if driver == "turnip" and vk_src.exists():
+            try:
+                patched = "IADroid: wg512" in vk_src.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                patched = None
+            if patched:
+                console.print("• Correctif conversations longues (> 1024 tokens) : [bold green]Appliqué[/bold green]")
+            elif patched is False:
+                console.print("• Correctif conversations longues (> 1024 tokens) : [bold red]Absent[/bold red]")
+                console.print("  [yellow]⚠ llama-server plantera au-delà de 1024 tokens. Tapez [bold cyan]/cmake-recompiler[/bold cyan] pour l'appliquer.[/yellow]")
+
+        # 6. Plafond de fréquence imposé par Android (Adreno / kgsl)
+        limits = self.get_gpu_limits()
+        if limits:
+            cap, hw_max, cause = limits
+            if cap < hw_max:
+                console.print(f"• Plafond GPU actuel : [bold red]{cap} MHz[/bold red] [dim](max matériel : {hw_max} MHz)[/dim]")
+                if cause == "thermal":
+                    console.print("  [yellow]⚠ Bridage thermique : le GPU est trop chaud. Laissez refroidir le téléphone (retirez la coque, évitez la charge).[/yellow]")
+                else:
+                    console.print("  [yellow]⚠ Bridé par la gestion de performances du système. Causes possibles :[/yellow]")
+                    console.print("  [yellow]  • hors du mode jeu (REDMAGIC, ROG...) : le GPU est plafonné au repos ;[/yellow]")
+                    console.print("  [yellow]  • protection thermique du constructeur : après un pic vers ~85 °C, GPU et CPU[/yellow]")
+                    console.print("  [yellow]    restent bridés jusqu'à refroidissement complet (même si le GPU redescend à 60 °C) ;[/yellow]")
+                    console.print("  [yellow]  • mode économie d'énergie actif.[/yellow]")
+                    console.print("  [cyan]  → Lancez Termux depuis le Game Space, ventilateur au maximum, sans coque ni charge,[/cyan]")
+                    console.print("  [cyan]    ou utilisez /boost-gpu (root).[/cyan]")
+            gpu_temp = self.get_gpu_temp()
+            if gpu_temp is not None:
+                color = "red" if gpu_temp >= 80 else ("yellow" if gpu_temp >= 65 else "green")
+                console.print(f"• Température GPU : [bold {color}]{gpu_temp} °C[/bold {color}]")
+            else:
+                console.print(f"• Plafond GPU actuel : [bold green]{cap} MHz (aucun bridage)[/bold green]")
+
         console.print("\n[dim]Astuce : Tapez /boost-gpu pour configurer les profils d'accélération et débloquer les 1000 MHz.[/dim]\n")
+
+    def get_gpu_limits(self):
+        """
+        Lit le plafond de fréquence Adreno imposé par le kernel (sans root).
+        Les niveaux kgsl indexent gpu_available_frequencies (0 = fréquence max).
+        Le plafond effectif est le plus restrictif de max_pwrlevel (gestion d'énergie
+        Android / perf HAL) et thermal_pwrlevel (bridage thermique).
+        Retourne (plafond_mhz, max_materiel_mhz, cause) avec cause 'power' ou 'thermal',
+        ou None si les informations ne sont pas lisibles (ex: GPU Mali).
+        """
+        kgsl = Path("/sys/class/kgsl/kgsl-3d0")
+        try:
+            freqs = [int(f) for f in (kgsl / "gpu_available_frequencies").read_text().split() if f.isdigit()]
+            freqs = sorted(set(freqs), reverse=True)
+            if not freqs:
+                return None
+            max_lvl = int((kgsl / "max_pwrlevel").read_text().strip())
+            try:
+                thermal_lvl = int((kgsl / "thermal_pwrlevel").read_text().strip())
+            except Exception:
+                thermal_lvl = 0
+            lvl = min(max(max_lvl, thermal_lvl), len(freqs) - 1)
+            cause = "thermal" if thermal_lvl > max_lvl else "power"
+            return freqs[lvl] // 1_000_000, freqs[0] // 1_000_000, cause
+        except Exception:
+            return None
+
+    def get_gpu_temp(self):
+        """Température GPU Adreno en °C (kgsl, lisible sans root), ou None."""
+        try:
+            raw = int(Path("/sys/class/kgsl/kgsl-3d0/temp").read_text().strip())
+            return raw // 1000 if raw > 1000 else raw
+        except Exception:
+            return None
 
     def get_gpu_freq(self) -> str:
         """Tente de lire la fréquence actuelle du GPU Adreno (kgsl / devfreq)."""
@@ -366,6 +436,19 @@ class LlamaBuilder:
             console.print(f"[red]Erreur lors de l'exécution de CMake : {e}[/red]")
             return False
 
+    def apply_llama_patches(self, revert: bool = False):
+        """Applique (ou retire) les correctifs IADroid sur les sources llama.cpp — voir scripts/patch_llama.sh."""
+        script = Path(__file__).resolve().parent.parent / "scripts" / "patch_llama.sh"
+        if not script.exists():
+            return
+        args = ["bash", str(script), str(self.src_dir)] + (["revert"] if revert else [])
+        try:
+            res = subprocess.run(args, capture_output=True, text=True, timeout=30)
+            if res.stdout.strip() and not revert:
+                console.print(f"[dim]{res.stdout.strip()}[/dim]")
+        except Exception as e:
+            console.print(f"[yellow]Correctifs llama.cpp non appliqués : {e}[/yellow]")
+
     def recompile(self, check_updates: bool = True) -> bool:
         """Vérifie les mises à jour et recompile avec le nombre de threads configuré (/cmake-recompiler)."""
         if not self.src_dir.exists():
@@ -383,12 +466,15 @@ class LlamaBuilder:
         ))
 
         # 1. Vérification des mises à jour du dépôt officiel
+        #    (les correctifs IADroid sont retirés avant le pull pour éviter les conflits, puis réappliqués)
         if check_updates and (self.src_dir / ".git").exists():
             console.print(f"[cyan]Recherche de mises à jour sur le dépôt officiel llama.cpp...[/cyan]")
             try:
+                self.apply_llama_patches(revert=True)
                 subprocess.run(["git", "pull"], cwd=str(self.src_dir))
             except Exception as e:
                 console.print(f"[yellow]Avertissement git pull : {e}[/yellow]")
+        self.apply_llama_patches()
 
         # 2. Vérification que la configuration CMake existe
         build_ninja = self.build_dir / "build.ninja"
