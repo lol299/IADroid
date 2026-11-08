@@ -21,7 +21,9 @@ from .config import (
     LLAMA_SERVER_PATH,
     LOGS_DIR,
     ANDROID_GREEN,
-    get_gpu_type
+    get_gpu_type,
+    get_vulkan_env,
+    get_vulkan_driver
 )
 from .preset_manager import is_llama_running, stop_llama_processes
 
@@ -47,7 +49,9 @@ class LlamaServer:
         - 'stopped' : Serveur non actif ou éteint
         """
         # Vérifier d'abord que le processus est vivant
-        if self.process and self.process.poll() is not None:
+        # (copie locale : self.process peut être remis à None par un autre thread)
+        proc = self.process
+        if proc and proc.poll() is not None:
             self.process = None
             return "stopped"
 
@@ -169,24 +173,8 @@ class LlamaServer:
         ctx_size = preset_data.get("context", {}).get("ctx_size", 4096)
         cmd.extend(["-c", str(ctx_size)])
 
-        # Assurer la liaison du pilote Vulkan système sous Termux
-        system_vk = Path("/system/lib64/libvulkan.so")
-        prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
-        termux_vk = Path(prefix) / "lib" / "libvulkan.so"
-        if system_vk.exists() and termux_vk.parent.exists():
-            try:
-                if not termux_vk.is_symlink() or str(termux_vk.resolve()) != str(system_vk):
-                    if termux_vk.exists() or termux_vk.is_symlink():
-                        termux_vk.unlink()
-                    os.symlink(str(system_vk), str(termux_vk))
-            except Exception:
-                pass
-
-        env = os.environ.copy()
-        env["TU_DEBUG"] = "noconform"
-        env["MESA_VK_WSI_PRESENT_MODE"] = "mailbox"
-        if system_vk.exists():
-            env["LD_LIBRARY_PATH"] = f"/system/lib64:{prefix}/lib:{env.get('LD_LIBRARY_PATH', '')}"
+        # Pilote Vulkan : Turnip (Adreno) ou pilote système Android (Mali) — voir config.get_vulkan_driver
+        env = get_vulkan_env()
 
         # Lancement en arrière-plan avec redirection des logs
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -194,32 +182,41 @@ class LlamaServer:
 
         if verbose:
             gpu_name = get_gpu_type()
-            dev_str = f"GPU Vulkan ({gpu_name})" if ngl > 0 else "CPU ARM64"
+            drv = get_vulkan_driver()
+            drv_label = "Turnip" if drv == "turnip" else "pilote système"
+            dev_str = f"GPU Vulkan ({gpu_name} · {drv_label})" if ngl > 0 else "CPU ARM64"
             console.print(f"[cyan]⚡ Démarrage de llama-server en arrière-plan ({dev_str})...[/cyan]")
             console.print(f"[dim]Modèle : {os.path.basename(model_path)} | Contexte : {ctx_size} tokens[/dim]")
 
         try:
-            self.process = subprocess.Popen(
+            proc = subprocess.Popen(
                 cmd,
                 stdout=log_fp,
                 stderr=subprocess.STDOUT,
                 env=env,
                 start_new_session=True
             )
+            self.process = proc
         except Exception as e:
             console.print(f"[red]Erreur lors du lancement de llama-server : {e}[/red]")
             log_fp.close()
             return False
 
         # Attente active du chargement (Health Check)
-        max_wait = 45  # secondes
+        # Le premier chargement d'un modèle depuis /storage/emulated (FUSE) peut dépasser
+        # la minute ; on attend tant que le processus est vivant (un crash sort immédiatement).
+        max_wait = 300  # secondes
         start_t = time.time()
         ready = False
 
-        with console.status(f"[bold cyan]Chargement du modèle en VRAM...[/bold cyan]", spinner="dots"):
+        with console.status(f"[bold cyan]Chargement du modèle en VRAM...[/bold cyan]", spinner="dots") as load_status:
             while time.time() - start_t < max_wait:
-                if self.process.poll() is not None:
+                # Référence locale : get_status() peut remettre self.process à None
+                if proc.poll() is not None:
                     break
+
+                elapsed = int(time.time() - start_t)
+                load_status.update(f"[bold cyan]Chargement du modèle en VRAM... {elapsed}s[/bold cyan]")
 
                 status = self.get_status()
                 if status == "ready":
@@ -298,9 +295,10 @@ class LlamaServer:
         Retourne (texte_complet, durée_secondes, nombre_tokens).
         """
         # Vérifier que le processus serveur est toujours vivant avant d'envoyer
-        if self.process and self.process.poll() is not None:
+        proc = self.process
+        if proc and proc.poll() is not None:
             raise RuntimeError(
-                f"Le processus llama-server a crashé (code retour: {self.process.returncode}). "
+                f"Le processus llama-server a crashé (code retour: {proc.returncode}). "
                 "Relancez avec /load ou /run."
             )
 
@@ -346,7 +344,8 @@ class LlamaServer:
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line or not line.startswith("data: "):
                         # Vérifier que le processus serveur est toujours vivant
-                        if self.process and self.process.poll() is not None:
+                        proc = self.process
+                        if proc and proc.poll() is not None:
                             raise RuntimeError("Le processus llama-server a crashé pendant la génération.")
                         continue
 

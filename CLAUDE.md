@@ -52,7 +52,14 @@ Pour publier : mettre `__version__` à jour dans `iadroid/version.py`, faire un 
 
 **Autres modules :**
 - `builder.py` (`LlamaBuilder`) : commandes `/check-gpu`, `/boost-gpu` (sysfs Adreno, nécessite root) et `/cmake-*` (configuration CMake avec `-DGGML_VULKAN=ON`, recompilation, threads de compilation limités pour éviter le Signal 9 / LMK).
-- `config.py` : `get_gpu_type()` détecte Adreno ou Mali (dans l'ordre : `/dev`, puis `getprop`, puis `/proc/cpuinfo`). `ensure_directories()` crée aussi le lien symbolique `$PREFIX/lib/libvulkan.so` vers le pilote système.
+- `config.py` : `get_gpu_type()` détecte Adreno ou Mali (dans l'ordre : `/dev`, puis `getprop`, puis `/proc/cpuinfo`).
+- **Pilote Vulkan.** `libggml-vulkan.so` charge `libvulkan.so` depuis `$PREFIX/lib`, et c'est ce lien qui détermine le pilote utilisé. `get_vulkan_driver()`, `ensure_vulkan_link()` et `get_vulkan_env()` (dans `config.py`) le font pointer :
+  - vers `libvulkan.so.1`, le chargeur Termux, donc **Turnip**, sur Adreno quand Turnip est installé ;
+  - sinon vers `/system/lib64/libvulkan.so`, le pilote constructeur, seul choix possible sur Mali ;
+  - on peut forcer le choix avec `IADROID_VULKAN=turnip|system`.
+
+  Le pilote Qualcomm d'origine plante (`createComputePipeline: ErrorUnknown` sur `mul_mat_vec_q4_k`), comme vérifié sur Adreno 750. Turnip fonctionne. Pour savoir quel pilote est actif : `llama-server --list-devices` affiche `Turnip Adreno (TM) 750` avec Turnip, et `Adreno (TM) 750` avec le pilote Qualcomm.
+- `stop_llama_processes()` fait `pkill -f "llama-"`. Il tue aussi toute commande shell dont le texte contient « llama- », par exemple une commande SSH de test : en tenir compte quand on teste à distance.
 - `updater.py` : `/update` fait un `git pull --ff-only` sur `lol299/IADroid@main`. En cas d'échec, il fait `git stash`, puis **`git reset --hard origin/main`**. Le dépôt cloné sur le téléphone ne doit donc pas contenir de modifications locales.
 - `crash_handler.py` : `handle_crash()` écrit un rapport dans `/sdcard/Download/` et l'affiche. Il est branché sur `sys.excepthook` dans `iadroid.py` et sur la boucle REPL.
 - `banner.py` contient la bannière, la mascotte et la table d'aide. Pour une nouvelle commande slash, il faut mettre à jour `handle_command`, `IADroidCompleter` (`cli.py`), la table d'aide (`banner.py`) et la table des commandes du `README.md`.

@@ -107,25 +107,97 @@ def get_gpu_type() -> str:
         pass
     return "Vulkan"
 
+# --- Sélection du pilote Vulkan -------------------------------------------------
+# llama.cpp (libggml-vulkan.so) charge "libvulkan.so" depuis $PREFIX/lib.
+# Ce lien décide du pilote utilisé :
+#   - Termux (libvulkan.so.1, vulkan-loader-generic) -> pilotes Mesa de $PREFIX/share/vulkan/icd.d
+#     => Turnip pour Adreno (stable avec llama.cpp)
+#   - Android (/system/lib64/libvulkan.so) -> pilote propriétaire du constructeur
+#     => seul choix pour Mali ; sur Adreno, le pilote Qualcomm plante avec
+#        'createComputePipeline: ErrorUnknown' (ex: mul_mat_vec_q4_k)
+# Forçable via la variable d'environnement IADROID_VULKAN=turnip|system.
+
+SYSTEM_VULKAN = Path("/system/lib64/libvulkan.so")
+
+def _termux_prefix() -> Path:
+    return Path(os.environ.get("PREFIX", "/data/data/com.termux/files/usr"))
+
+def get_turnip_icd():
+    """Retourne le chemin du manifeste ICD Turnip (Mesa freedreno) s'il est installé, sinon None."""
+    icd_dir = _termux_prefix() / "share" / "vulkan" / "icd.d"
+    try:
+        for p in sorted(icd_dir.glob("freedreno_icd*.json")):
+            return p
+    except Exception:
+        pass
+    return None
+
+def get_vulkan_driver() -> str:
+    """
+    Choisit le pilote Vulkan à utiliser :
+    - 'turnip' : GPU Adreno + Turnip installé + chargeur Vulkan Termux présent
+    - 'system' : pilote Android du constructeur (Mali, ou Adreno sans Turnip)
+    - 'none'   : aucun pilote Vulkan trouvé
+    """
+    termux_loader = _termux_prefix() / "lib" / "libvulkan.so.1"
+    forced = os.environ.get("IADROID_VULKAN", "").strip().lower()
+    if forced == "turnip" and termux_loader.exists():
+        return "turnip"
+    if forced == "system" and SYSTEM_VULKAN.exists():
+        return "system"
+
+    if get_gpu_type() == "Adreno" and get_turnip_icd() and termux_loader.exists():
+        return "turnip"
+    if SYSTEM_VULKAN.exists():
+        return "system"
+    if termux_loader.exists():
+        return "turnip"
+    return "none"
+
+def ensure_vulkan_link() -> str:
+    """
+    Fait pointer $PREFIX/lib/libvulkan.so vers le chargeur correspondant au pilote choisi.
+    Retourne le pilote actif ('turnip', 'system' ou 'none').
+    """
+    driver = get_vulkan_driver()
+    lib_dir = _termux_prefix() / "lib"
+    link = lib_dir / "libvulkan.so"
+    if driver == "turnip":
+        target = "libvulkan.so.1"  # chargeur Termux, cible relative comme le paquet d'origine
+        expected = lib_dir / "libvulkan.so.1"
+    elif driver == "system":
+        target = str(SYSTEM_VULKAN)
+        expected = SYSTEM_VULKAN
+    else:
+        return driver
+
+    if not lib_dir.exists():
+        return driver
+    try:
+        if not link.is_symlink() or link.resolve() != expected.resolve():
+            if link.exists() or link.is_symlink():
+                link.unlink()
+            os.symlink(target, str(link))
+    except Exception:
+        pass
+    return driver
+
+def get_vulkan_env(base_env: dict = None) -> dict:
+    """Environnement de lancement des binaires llama.cpp, adapté au pilote Vulkan actif."""
+    env = dict(base_env if base_env is not None else os.environ)
+    driver = ensure_vulkan_link()
+    if driver == "turnip":
+        env["TU_DEBUG"] = "noconform"
+        env["MESA_VK_WSI_PRESENT_MODE"] = "mailbox"
+    elif driver == "system":
+        env["LD_LIBRARY_PATH"] = f"/system/lib64:{_termux_prefix() / 'lib'}:{env.get('LD_LIBRARY_PATH', '')}"
+    return env
+
 def ensure_directories():
-    """Crée l'arborescence des dossiers et assure la liaison du pilote GPU Vulkan sous Termux."""
+    """Crée l'arborescence des dossiers et règle la liaison du pilote GPU Vulkan sous Termux."""
     for d in (PRESETS_DIR, MODELS_DIR, BIN_DIR, LOGS_DIR):
         d.mkdir(parents=True, exist_ok=True)
-
-    # Liaison automatique du pilote Vulkan système d'Android sous Termux
-    system_vulkan = Path("/system/lib64/libvulkan.so")
-    prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
-    termux_lib = Path(prefix) / "lib"
-    termux_vulkan = termux_lib / "libvulkan.so"
-
-    if system_vulkan.exists() and termux_lib.exists():
-        try:
-            if not termux_vulkan.is_symlink() or str(termux_vulkan.resolve()) != str(system_vulkan):
-                if termux_vulkan.exists() or termux_vulkan.is_symlink():
-                    termux_vulkan.unlink()
-                os.symlink(str(system_vulkan), str(termux_vulkan))
-        except Exception:
-            pass
+    ensure_vulkan_link()
 
 def get_default_preset(name: str = "default") -> dict:
     """Retourne la structure par défaut d'un profil IADroid avec les réglages optimisés pour mobile."""

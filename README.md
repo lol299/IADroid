@@ -276,11 +276,11 @@ Sur certains GPU mobiles, des architectures de modèles spécifiques (ex: Gemma 
 * Ou déchargez moins de couches sur le GPU : `/device gpu 15`
 
 ### 4. `warning: no usable GPU found`
-Si seul `llvmpipe` (CPU logiciel) est détecté sur une puce Qualcomm Snapdragon :
+Si seul `llvmpipe` (CPU logiciel) est détecté sur une puce Qualcomm Snapdragon, installez le pilote Turnip puis lancez `/check-gpu` :
 ```bash
 pkg install -y mesa-vulkan-icd-freedreno
-ln -sf /system/lib64/libvulkan.so $PREFIX/lib/libvulkan.so
 ```
+IADroid choisit automatiquement le pilote Vulkan : **Turnip** sur Adreno (le pilote Qualcomm d'origine fait échouer les shaders de llama.cpp avec `createComputePipeline: ErrorUnknown`), et le **pilote système Android** sur Mali. Pour forcer un choix : `export IADROID_VULKAN=turnip` ou `export IADROID_VULKAN=system`.
 
 ### 5. Fréquence GPU bridée (ex: 578 MHz sur Adreno 750)
 * **Avec Root (`su`) :** Tapez `/boost-gpu` dans IADroid pour verrouiller le GPU à sa fréquence maximale (1 000 MHz) tout en bridant le CPU pour concentrer l'énergie thermique sur le GPU.

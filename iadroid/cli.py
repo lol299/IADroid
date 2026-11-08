@@ -505,6 +505,12 @@ class IADroidCLI:
         """
         while not self._monitor_stop.wait(2.0):
             try:
+                # Ne surveiller que pendant la saisie : pendant /load, /run ou une génération,
+                # le thread principal gère lui-même le serveur (évite les accès concurrents)
+                app = self.session.app
+                if not app.is_running:
+                    continue
+
                 changed = False
 
                 ram = get_ram_info()
@@ -518,10 +524,8 @@ class IADroidCLI:
                     self._cached_server_status = status
                     changed = True
 
-                if changed:
-                    app = self.session.app
-                    if app.is_running:
-                        app.invalidate()
+                if changed and app.is_running:
+                    app.invalidate()
             except Exception:
                 pass
 

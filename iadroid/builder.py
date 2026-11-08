@@ -12,7 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.prompt import Prompt
 
-from .config import IADROID_HOME, BIN_DIR, LLAMA_CLI_PATH, ANDROID_GREEN, get_gpu_type
+from .config import IADROID_HOME, BIN_DIR, LLAMA_CLI_PATH, ANDROID_GREEN, get_gpu_type, ensure_vulkan_link
 
 console = Console()
 THREADS_FILE = IADROID_HOME / "compile_threads.txt"
@@ -112,21 +112,18 @@ class LlamaBuilder:
         console.print(f"• Pilote système Android (/system/lib64/libvulkan.so) : "
                       f"{'[bold green]Présent[/bold green]' if has_system else '[red]Absent[/red]'}")
 
-        # 2. Vérification du lien direct vers le GPU physique
-        if has_system:
-            try:
-                is_linked = termux_vulkan.is_symlink() and str(termux_vulkan.resolve()) == str(system_vulkan)
-                if not is_linked:
-                    console.print(f"[yellow]• Liaison directe Termux ↔ GPU Android : Non liée.[/yellow]")
-                    console.print(f"  [cyan]Création automatique du lien vers le GPU physique...[/cyan]")
-                    if termux_vulkan.exists() or termux_vulkan.is_symlink():
-                        termux_vulkan.unlink()
-                    os.symlink(str(system_vulkan), str(termux_vulkan))
-                    console.print(f"  [bold green]✓ Lien créé avec succès : {termux_vulkan} -> {system_vulkan}[/bold green]")
-                else:
-                    console.print(f"• Liaison directe Termux ↔ GPU Android : [bold green]Active (Hardware direct)[/bold green]")
-            except Exception as e:
-                console.print(f"  [dim]Note lien : {e}[/dim]")
+        # 2. Pilote Vulkan utilisé par llama.cpp (lien $PREFIX/lib/libvulkan.so)
+        driver = ensure_vulkan_link()
+        try:
+            link_target = os.readlink(str(termux_vulkan)) if termux_vulkan.is_symlink() else "?"
+        except Exception:
+            link_target = "?"
+        if driver == "turnip":
+            console.print(f"• Pilote Vulkan utilisé par llama.cpp : [bold green]Turnip (Mesa)[/bold green] [dim](libvulkan.so -> {link_target})[/dim]")
+        elif driver == "system":
+            console.print(f"• Pilote Vulkan utilisé par llama.cpp : [bold green]Pilote système Android[/bold green] [dim](libvulkan.so -> {link_target})[/dim]")
+        else:
+            console.print("• Pilote Vulkan utilisé par llama.cpp : [red]Aucun[/red]")
 
         # 3. Détection du type de GPU matériel du smartphone
         detected_gpu = get_gpu_type()
@@ -140,7 +137,7 @@ class LlamaBuilder:
                 console.print(f"[bold yellow]👉 Pour activer l'accélération matérielle Adreno, installez le pilote Turnip :[/bold yellow]")
                 console.print(f"   [bold cyan]pkg install -y mesa-vulkan-icd-freedreno[/bold cyan]")
             else:
-                console.print("• Pilote Turnip Vulkan (Adreno) : [bold green]Installé et actif[/bold green]")
+                console.print("• Pilote Turnip Vulkan (Adreno) : [bold green]Installé[/bold green]")
         elif has_mali:
             console.print("• Matériel GPU : [bold green]ARM Mali / MediaTek détecté[/bold green]")
         else:
@@ -339,19 +336,8 @@ class LlamaBuilder:
             border_style=ANDROID_GREEN
         ))
 
-        # Assurer le lien du pilote Vulkan système vers Termux
-        system_vulkan = Path("/system/lib64/libvulkan.so")
-        termux_lib = Path(self.prefix) / "lib"
-        termux_vulkan = termux_lib / "libvulkan.so"
-        if system_vulkan.exists() and termux_lib.exists():
-            try:
-                if not termux_vulkan.exists() or not termux_vulkan.is_symlink():
-                    if termux_vulkan.exists() or termux_vulkan.is_symlink():
-                        termux_vulkan.unlink()
-                    os.symlink(str(system_vulkan), str(termux_vulkan))
-                    console.print(f"[bold {ANDROID_GREEN}]✓ Pilote Vulkan système relié : {termux_vulkan} -> {system_vulkan}[/bold {ANDROID_GREEN}]")
-            except Exception:
-                pass
+        # Assurer le lien libvulkan.so vers le chargeur adapté (Turnip ou pilote système)
+        ensure_vulkan_link()
 
         cmake_args = [
             "cmake",
