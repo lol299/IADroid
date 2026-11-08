@@ -35,3 +35,6 @@ CMakeCache.txt
 Thumbs.db
 *.swp
 *~
+
+# Configuration locale du déploiement SSH (scripts/deploy.sh)
+.deploy.env

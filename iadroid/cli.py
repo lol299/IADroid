@@ -334,27 +334,23 @@ class IADroidCLI:
         self._last_status_check = 0.0
         self._cached_server_status = "stopped"
         
+        # Instantané des métriques affichées dans la barre d'état.
+        # Mis à jour par un thread de fond qui ne redessine l'écran QUE si une valeur
+        # change de façon notable : un redessin périodique ramène Termux tout en bas
+        # et empêche de remonter dans la conversation.
+        self._ram_snapshot = get_ram_info()
+        self._monitor_stop = threading.Event()
+
         # Historique persistant des commandes
+        # reserve_space_for_menu=0 : pas de lignes vides réservées pour l'autocomplétion,
+        # la zone de saisie ne fait que la hauteur de son contenu et grandit si le texte déborde.
         history_file = str(IADROID_HOME / "history.txt")
         self.session = PromptSession(
             history=FileHistory(history_file),
             auto_suggest=AutoSuggestFromHistory(),
-            completer=IADroidCompleter(self.manager)
+            completer=IADroidCompleter(self.manager),
+            reserve_space_for_menu=0
         )
-
-        # Ancrer la zone de saisie tout en bas de l'écran (style Claude Code)
-        # pour que le prompt > et la barre inférieure soient collés ensemble au bas du terminal
-        try:
-            from prompt_toolkit.layout.containers import VerticalAlign
-            from prompt_toolkit.filters import to_filter
-            root = self.session.layout.container
-            if hasattr(root, 'align'):
-                root.align = VerticalAlign.BOTTOM
-            cw = self.session.layout.current_window
-            if cw:
-                cw.dont_extend_height = to_filter(True)
-        except Exception:
-            pass
 
         # Style de l'invite de commande (Style Claude Code épuré, sans fond blanc disgracieux)
         self.style = Style.from_dict({
@@ -400,13 +396,13 @@ class IADroidCLI:
         - Ligne 1 : Ligne horizontale de séparation ─
         - Ligne 2 : ⚡ vitesse | 🧠 tokens contexte (%) | 💾 RAM: used (pct%)/total | Lib: free | ● statut
         - Ligne 3 : ❯❯ Profil actif · Matériel · /help
-        Actualisée chaque seconde en direct via refresh_interval=1.0.
+        Redessinée uniquement sur changement notable (voir _status_monitor_loop).
         """
         term_width = shutil.get_terminal_size().columns
         width = max(10, min(term_width - 1, 100))
         sep_line = "─" * width
 
-        used_ram, total_ram, ram_pct, free_ram = get_ram_info()
+        used_ram, total_ram, ram_pct, free_ram = self._ram_snapshot
         if ram_pct >= 85:
             ram_badge = f'<style fg="#FF5555"><b>{used_ram:.1f}G ({ram_pct:.0f}%)</b></style>'
         elif ram_pct >= 70:
@@ -439,11 +435,11 @@ class IADroidCLI:
         ratio = min(1.0, max(0.0, used / max(1, ctx_total)))
         pct = ratio * 100
 
-        # Statut serveur (mis en cache 2.5s pour préserver les connexions HTTP et éviter la famine)
-        now = time.time()
-        if now - self._last_status_check > 2.5:
+        # Statut serveur : rafraîchi si le cache a été invalidé (ex: après /load, /stop),
+        # sinon fourni par le thread de surveillance (_status_monitor_loop)
+        if self._last_status_check == 0.0:
             self._cached_server_status = self.server.get_status()
-            self._last_status_check = now
+            self._last_status_check = time.time()
         server_status = self._cached_server_status
 
         if server_status == "ready":
@@ -499,6 +495,35 @@ class IADroidCLI:
                 f'<style fg="#888888"> (VRAM)</style>'
             )
             return HTML(f"{line_border}\n{line_metrics}\n{line_info}")
+
+    def _status_monitor_loop(self):
+        """
+        Surveille RAM et statut serveur en arrière-plan pendant la saisie.
+        Ne déclenche un redessin que lors d'un changement notable (statut serveur,
+        ou variation de RAM ≥ 3 %), afin de ne pas ramener le terminal en bas
+        quand l'utilisateur remonte lire la conversation.
+        """
+        while not self._monitor_stop.wait(2.0):
+            try:
+                changed = False
+
+                ram = get_ram_info()
+                if abs(ram[2] - self._ram_snapshot[2]) >= 3.0:
+                    self._ram_snapshot = ram
+                    changed = True
+
+                status = self.server.get_status()
+                self._last_status_check = time.time()
+                if status != self._cached_server_status:
+                    self._cached_server_status = status
+                    changed = True
+
+                if changed:
+                    app = self.session.app
+                    if app.is_running:
+                        app.invalidate()
+            except Exception:
+                pass
 
     def handle_command(self, user_input: str) -> bool:
         """Exécute une commande utilisateur. Retourne False pour quitter."""
@@ -970,15 +995,22 @@ class IADroidCLI:
             sys_p = active_preset.get("context", {}).get("system_prompt", "")
             self.context_tokens_used = int(len(sys_p.split()) * 1.3)
 
+        monitor = threading.Thread(target=self._status_monitor_loop, daemon=True)
+        monitor.start()
+
         try:
             while True:
                 try:
-                    # Invite de commande style Claude Code avec rafraîchissement dynamique chaque seconde
+                    # Valeurs fraîches à chaque nouvelle invite
+                    self._ram_snapshot = get_ram_info()
+                    self._last_status_check = 0.0
+
+                    # Pas de refresh_interval : le redessin périodique empêchait de
+                    # remonter dans l'historique (Termux redescend à chaque rendu)
                     user_input = self.session.prompt(
                         self.get_prompt_message,
                         style=self.style,
-                        bottom_toolbar=self.get_bottom_toolbar,
-                        refresh_interval=1.0
+                        bottom_toolbar=self.get_bottom_toolbar
                     )
                     should_continue = self.handle_command(user_input)
                     if not should_continue:
@@ -998,4 +1030,5 @@ class IADroidCLI:
                     }
                     handle_crash(e, extra_context=ctx)
         finally:
+            self._monitor_stop.set()
             self.server.stop()
