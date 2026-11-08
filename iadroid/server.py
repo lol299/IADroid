@@ -286,7 +286,8 @@ class LlamaServer:
         messages: List[Dict[str, str]],
         sampling: Dict[str, Any],
         on_token: Callable[[str], None],
-        reasoning_effort: Optional[str] = None
+        reasoning_effort: Optional[str] = None,
+        thinking_enabled: Optional[bool] = None
     ) -> Tuple[str, float, int]:
         """
         Envoie une requête de chat au format standard OpenAI /v1/chat/completions
@@ -322,6 +323,14 @@ class LlamaServer:
             "min_p": sampling.get("min_p", 0.05),
             "repeat_penalty": sampling.get("repeat_penalty", 1.1)
         }
+
+        # Contrôle réel de la réflexion via le template de chat du modèle (Qwen3/3.5, DeepSeek, etc.).
+        # Sans cela, /think off n'était qu'une consigne texte que le modèle pouvait ignorer.
+        if thinking_enabled is not None:
+            kwargs = {"enable_thinking": bool(thinking_enabled)}
+            if thinking_enabled and reasoning_effort and reasoning_effort != "off":
+                kwargs["reasoning_effort"] = reasoning_effort
+            payload["chat_template_kwargs"] = kwargs
 
         req = urllib.request.Request(
             url,

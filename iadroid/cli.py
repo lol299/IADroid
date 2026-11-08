@@ -85,7 +85,11 @@ class ThinkStreamParser:
                         self.had_think = True
                         self.on_think_start(self.show_thinking)
                     else:
+                        # Le modèle réfléchit malgré /think off : on masque le texte
+                        # mais on le signale (sinon l'attente semble inexpliquée)
                         self.state = "DISCARD_THINK"
+                        self.had_think = True
+                        self.on_think_start(False)
 
                     self.buffer = self.buffer[idx + 7:]
                     continue
@@ -169,6 +173,7 @@ class ThinkStreamParser:
             elif self.state == "DISCARD_THINK":
                 if "</think>" in self.buffer:
                     idx = self.buffer.find("</think>")
+                    self.on_think_end(0, False)
                     self.state = "STREAMING"
                     self.buffer = self.buffer[idx + 8:].lstrip("\r\n")
                     continue
@@ -884,7 +889,10 @@ class IADroidCLI:
             nonlocal think_start_time, accumulated_think_text
             think_start_time = time.time()
             accumulated_think_text = ""
-            spinner.update("[dim]💭 Réflexion en cours...[/dim]")
+            if thinking_enabled:
+                spinner.update("[dim]💭 Réflexion en cours...[/dim]")
+            else:
+                spinner.update("[dim]💭 Le modèle réfléchit malgré /think off (masqué)...[/dim]")
 
         def on_think_token(tok: str):
             nonlocal accumulated_think_text
@@ -906,7 +914,10 @@ class IADroidCLI:
         def on_think_end(tok_count: int, show: bool = True):
             spinner.stop()
             t_elapsed = max(0.1, time.time() - (think_start_time or start_time))
-            console.print(f"\n[dim]💭 Réfléchi en {t_elapsed:.1f}s[/dim]")
+            if thinking_enabled:
+                console.print(f"\n[dim]💭 Réfléchi en {t_elapsed:.1f}s[/dim]")
+            else:
+                console.print(f"\n[dim]💭 Réfléchi en {t_elapsed:.1f}s [yellow](ce modèle ignore /think off)[/yellow][/dim]")
             sys.stdout.flush()
 
         def on_response_start():
@@ -935,7 +946,9 @@ class IADroidCLI:
             full_reply, elapsed, gen_tokens = self.server.stream_chat(
                 messages=messages,
                 sampling=preset.get("sampling", {}),
-                on_token=on_raw_token
+                on_token=on_raw_token,
+                reasoning_effort=effort,
+                thinking_enabled=thinking_enabled
             )
             parser.finish()
 
