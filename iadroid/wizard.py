@@ -16,7 +16,10 @@ from .config import (
     REASONING_EFFORT_LEVELS,
     REASONING_TOKEN_BUDGETS,
     get_default_preset,
-    MODELS_DIR
+    MODELS_DIR,
+    get_gpu_type,
+    recommended_cpu_threads,
+    gguf_has_mtp
 )
 from .preset_manager import PresetManager
 
@@ -110,6 +113,13 @@ class PresetWizard:
             console.print(f"\n[bold {ANDROID_GREEN}]3. Matériel, Calcul & Gestion RAM Unifiée[/bold {ANDROID_GREEN}]")
             hw = current_data.setdefault("hardware", {})
 
+            if get_gpu_type() == "Adreno":
+                console.print(
+                    "  [dim]Conseil Adreno : le CPU (gros cœurs) est souvent plus rapide que le GPU Vulkan, "
+                    "surtout avec un modèle Q4_0. Mesuré sur Snapdragon 8 Gen 3 : Qwen3.5-9B 8,2 t/s en CPU "
+                    "contre 5,5 t/s en GPU, Gemma 4 E2B 25 t/s contre 14 t/s. Le CPU n'est pas non plus "
+                    "limité par le bridage thermique du GPU. Convertissez le modèle avec /quantize.[/dim]")
+
             device = Prompt.ask(
                 "  [cyan]Périphérique d'accélération[/cyan]",
                 choices=["gpu", "cpu"],
@@ -122,11 +132,22 @@ class PresetWizard:
                 help_text="99 = tout sur GPU Vulkan, 0 = 100% CPU"
             )
 
+            best_threads = recommended_cpu_threads()
             hw["cpu_threads"] = self._ask_int(
                 "Nombre de threads CPU (-t)",
-                hw.get("cpu_threads", 4),
-                help_text="Recommandé : 4 ou le nombre de cœurs de performance du processeur"
+                best_threads if device == "cpu" else hw.get("cpu_threads", best_threads),
+                help_text=f"Recommandé : {best_threads} (cœurs de performance). Ajouter les petits cœurs ralentit."
             )
+
+            # Décodage spéculatif MTP : seulement si le modèle embarque des couches MTP
+            if gguf_has_mtp(current_data.get("model_path", "")):
+                console.print("  [dim]Ce modèle contient des couches MTP : il peut prédire plusieurs tokens "
+                              "à la fois (+10 à +35 % de vitesse de génération en CPU).[/dim]")
+                hw["speculative"] = Prompt.ask(
+                    "  [cyan]Décodage spéculatif MTP[/cyan] (auto = en mode CPU uniquement)",
+                    choices=["auto", "on", "off"],
+                    default=hw.get("speculative", "auto")
+                )
 
             hw["batch"] = self._ask_int("Taille de Batch prompt (-b)", hw.get("batch", 512))
             hw["ubatch"] = self._ask_int("Taille de Micro-batch (-ub)", hw.get("ubatch", 128))

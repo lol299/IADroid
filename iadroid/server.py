@@ -25,7 +25,9 @@ from .config import (
     get_gpu_type,
     get_vulkan_env,
     get_vulkan_driver,
-    effective_ubatch
+    effective_ubatch,
+    runtime_args,
+    mtp_active
 )
 from .preset_manager import is_llama_running, stop_llama_processes
 
@@ -179,6 +181,9 @@ class LlamaServer:
         ctx_size = preset_data.get("context", {}).get("ctx_size", 4096)
         cmd.extend(["-c", str(ctx_size)])
 
+        # 100 % CPU (-dev none) et décodage spéculatif MTP (config.runtime_args)
+        cmd.extend(runtime_args(preset_data))
+
         # Pilote Vulkan : Turnip (Adreno) ou pilote système Android (Mali) — voir config.get_vulkan_driver
         env = get_vulkan_env()
 
@@ -192,7 +197,9 @@ class LlamaServer:
             drv_label = "Turnip" if drv == "turnip" else "pilote système"
             dev_str = f"GPU Vulkan ({gpu_name} · {drv_label})" if ngl > 0 else "CPU ARM64"
             console.print(f"[cyan]⚡ Démarrage de llama-server en arrière-plan ({dev_str})...[/cyan]")
-            console.print(f"[dim]Modèle : {os.path.basename(model_path)} | Contexte : {ctx_size} tokens[/dim]")
+            mtp = " | MTP activé" if mtp_active(preset_data) else ""
+            console.print(f"[dim]Modèle : {os.path.basename(model_path)} | Contexte : {ctx_size} tokens | "
+                          f"{hw.get('cpu_threads', 4)} threads{mtp}[/dim]")
 
         try:
             proc = subprocess.Popen(

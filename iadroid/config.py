@@ -27,6 +27,127 @@ AGENT_SETTINGS_FILE = IADROID_HOME / "agent.json"
 # Chemins binaires par défaut
 LLAMA_CLI_PATH = BIN_DIR / "llama-cli"
 LLAMA_SERVER_PATH = BIN_DIR / "llama-server"
+LLAMA_SRC_DIR = IADROID_HOME / "src" / "llama.cpp"
+
+
+def get_quantize_path():
+    """Binaire llama-quantize (compilé avec llama.cpp dans build/bin), ou None."""
+    for p in (BIN_DIR / "llama-quantize", LLAMA_SRC_DIR / "build" / "bin" / "llama-quantize"):
+        if p.exists():
+            return p
+    return None
+
+
+def recommended_cpu_threads() -> int:
+    """
+    Nombre de threads CPU conseillé : les cœurs de performance, c'est-à-dire tous sauf
+    le groupe de cœurs à la fréquence maximale la plus basse (petits cœurs d'efficacité).
+    Mesuré sur Snapdragon 8 Gen 3 : 6 threads (gros cœurs) > 7 ou 8 threads (petits cœurs inclus,
+    qui ralentissent tout le monde) > 4 threads.
+    """
+    n = os.cpu_count() or 8
+    freqs = []
+    for i in range(n):
+        try:
+            with open(f"/sys/devices/system/cpu/cpu{i}/cpufreq/cpuinfo_max_freq") as f:
+                freqs.append(int(f.read().strip()))
+        except (OSError, ValueError):
+            pass
+    if len(freqs) == n and len(set(freqs)) > 1:
+        big = sum(1 for f in freqs if f > min(freqs))
+        if big >= 2:
+            return big
+    return max(2, n // 2)
+
+
+def cpu_only(hw: dict) -> bool:
+    """Profil 100 % CPU (device cpu et aucune couche sur le GPU)."""
+    dev = hw.get("device", "gpu")
+    return dev == "cpu" and int(hw.get("ngl", 0)) == 0
+
+
+def mtp_active(preset_data: dict) -> bool:
+    """
+    Décodage spéculatif MTP utilisé pour ce profil ?
+    hardware.speculative : "auto" (si le modèle a des couches MTP et que le profil est 100 % CPU),
+    "on" (dès que le modèle en a), "off". En auto, pas de MTP sur GPU : mesuré sur Adreno 750
+    en OpenCL, la vérification des tokens proposés y fait chuter la génération (7 → 3 t/s).
+    """
+    hw = preset_data.get("hardware", {})
+    mode = str(hw.get("speculative", "auto")).lower()
+    if mode == "off" or not gguf_has_mtp(preset_data.get("model_path") or ""):
+        return False
+    return mode == "on" or cpu_only(hw)
+
+
+def runtime_args(preset_data: dict, server: bool = True) -> list:
+    """
+    Arguments llama.cpp communs aux lanceurs (llama-server et llama-cli) :
+    - « -dev none » en 100 % CPU : sinon, avec -ngl 0, llama.cpp envoie quand même les gros
+      calculs du prefill au GPU Vulkan (op offload), et initialise Turnip pour rien ;
+    - « --spec-type draft-mtp » (serveur) si le MTP est actif : +10 à +35 % en génération sur CPU.
+    """
+    args = []
+    if cpu_only(preset_data.get("hardware", {})):
+        args += ["-dev", "none"]
+    if server and mtp_active(preset_data):
+        args += ["--spec-type", "draft-mtp"]
+    return args
+
+
+_MTP_CACHE = {}
+
+
+def gguf_has_mtp(model_path: str) -> bool:
+    """
+    Vrai si le modèle GGUF embarque des couches de prédiction multi-tokens (MTP,
+    clé « <arch>.nextn_predict_layers » > 0, ex. Qwen3.5). Elles permettent le décodage
+    spéculatif sans modèle brouillon (--spec-type draft-mtp). Lit seulement les métadonnées.
+    """
+    import struct
+    try:
+        key = (model_path, os.path.getmtime(model_path))
+    except OSError:
+        return False
+    if key in _MTP_CACHE:
+        return _MTP_CACHE[key]
+
+    sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+    found = False
+    try:
+        with open(model_path, "rb") as f:
+            def rd(fmt):
+                return struct.unpack("<" + fmt, f.read(struct.calcsize("<" + fmt)))[0]
+
+            def rstr():
+                return f.read(rd("Q")).decode("utf-8", "replace")
+
+            def skip(t):
+                if t == 8:
+                    f.seek(rd("Q"), 1)
+                elif t == 9:
+                    st, cnt = rd("I"), rd("Q")
+                    if st in sizes:
+                        f.seek(sizes[st] * cnt, 1)
+                    else:
+                        for _ in range(cnt):
+                            skip(st)
+                else:
+                    f.seek(sizes[t], 1)
+
+            if f.read(4) != b"GGUF":
+                raise ValueError
+            rd("I"); rd("Q")
+            for _ in range(rd("Q")):
+                k, t = rstr(), rd("I")
+                if k.endswith(".nextn_predict_layers") and t in (4, 5, 10, 11):
+                    found = rd({4: "I", 5: "i", 10: "Q", 11: "q"}[t]) > 0
+                    break
+                skip(t)
+    except Exception:
+        found = False
+    _MTP_CACHE[key] = found
+    return found
 
 # Couleurs & Thème UI
 ANDROID_GREEN = "#3DDC84"
@@ -223,8 +344,7 @@ def ensure_directories():
 def get_default_preset(name: str = "default") -> dict:
     """Retourne la structure par défaut d'un profil IADroid avec les réglages optimisés pour mobile."""
     # Détection des cœurs CPU : sur mobile, privilégier les gros cœurs (Performance cores)
-    cpu_count = os.cpu_count() or 8
-    threads = max(2, cpu_count // 2)
+    threads = recommended_cpu_threads()
 
     return {
         "name": name,
@@ -242,7 +362,8 @@ def get_default_preset(name: str = "default") -> dict:
             "flash_attention": True, # -fa : réduit l'empreinte mémoire du contexte par 2-3
             "kv_unified": True,      # Cache KV unifié
             "cache_type_k": "f16",   # Type de quantification pour les clés KV (f16, q8_0, q4_0)
-            "cache_type_v": "f16"    # Type de quantification pour les valeurs KV (f16, q8_0, q4_0)
+            "cache_type_v": "f16",   # Type de quantification pour les valeurs KV (f16, q8_0, q4_0)
+            "speculative": "auto"    # MTP (--spec-type draft-mtp) : auto = si le modèle l'embarque et en mode CPU
         },
         "context": {
             "ctx_size": 4096,        # Contexte en tokens (-c)

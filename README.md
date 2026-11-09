@@ -133,6 +133,8 @@ Vous arrivez sur l'interface épurée avec la mascotte Bugdroid, la ligne de sai
 | **`/effort`** | `<level>` | Règle l'effort de réflexion (`minimal`, `low`, `medium`, `high`, `xhigh`, `off`). |
 | **`/device`** | `<gpu\|cpu> [ngl]` | Bascule le calcul entre GPU Vulkan et CPU ARM64 (avec couches `-ngl` optionnelles). |
 | **`/fa`** | `<on\|off>` | Active ou désactive Flash Attention (`-fa`) pour le profil en cours. |
+| **`/mtp`** | `<auto\|on\|off>` | Décodage spéculatif MTP : les modèles qui embarquent des couches MTP (ex. Qwen3.5) prédisent plusieurs tokens à la fois, soit +10 à +35 % de vitesse de génération en CPU. `auto` l'active en mode CPU uniquement. |
+| **`/quantize`** | `[Q4_0\|Q8_0\|…]` | Convertit le modèle du profil actif (Q4_0 par défaut) dans `~/.iadroid/models` et propose de l'utiliser dans le profil. |
 | **`/presets`** | | Affiche le tableau récapitulatif de tous les profils enregistrés. |
 | **`/create-preset`** | | Assistant interactif pas à pas pour configurer un nouveau modèle GGUF. |
 | **`/profil_config`** | `<nom>` | Ouvre l'assistant pré-rempli pour éditer un profil existant. |
@@ -243,12 +245,31 @@ Sur les SoC équipés d'un GPU **ARM Mali / Immortalis**, IADroid détecte autom
 
 ## ⚙️ Optimisation des Performances (Snapdragon 8 Gen 3 / Adreno 750)
 
-Pour tirer le maximum de bande passante et de tokens/seconde de votre smartphone :
+### CPU ou GPU ? Mesures sur REDMAGIC 9S Pro (Snapdragon 8 Gen 3)
+
+Sur ce téléphone, **le CPU est plus rapide que le GPU Vulkan**. La génération est limitée par la bande passante mémoire, et le CPU y accède mieux. Il n'est pas non plus touché par le bridage thermique du GPU (578 MHz au lieu de 1000 MHz après quelques minutes).
+
+| Modèle | Configuration | Prefill (traitement du prompt) | Génération |
+| :--- | :--- | ---: | ---: |
+| Qwen3.5-9B | GPU Vulkan, Q4_K_M | 24 t/s | 5,5 t/s |
+| Qwen3.5-9B | **CPU 6 threads, Q4_0** | **46 t/s** | **8,2 t/s** |
+| Qwen3.5-9B | CPU 6 threads, Q4_0 + **MTP** | 46 t/s | **9 à 10 t/s** |
+| Gemma 4 E2B | GPU Vulkan, Q4_K_M | 313 t/s | 14 t/s |
+| Gemma 4 E2B | **CPU 6 threads, Q4_0** | 233 t/s | **25 t/s** |
+
+**Réglages conseillés :**
+1. **`/device cpu`** : passe le profil en 100 % CPU, règle les threads sur les cœurs de performance (6 sur Snapdragon 8 Gen 3 ; ajouter les petits cœurs ralentit tout) et ajoute `-dev none` pour que le GPU ne soit pas utilisé du tout.
+2. **`/quantize`** : convertit le modèle en **Q4_0**, le format le plus rapide sur CPU ARM (instructions `i8mm`). Le prefill du Qwen passe de 31 à 48 t/s. Si le format existe sur Hugging Face, le télécharger directement donne une qualité légèrement meilleure.
+3. **`/mtp auto`** (par défaut) : les modèles qui embarquent des couches MTP (Qwen3.5) prédisent plusieurs tokens à la fois, soit +10 à +35 % en génération, actif en mode CPU.
+
+### Réglages GPU (Vulkan)
 
 1. **Cache KV en `f16` :** Avec la bande passante LPDDR5X (~77 Go/s) des processeurs récents, `f16` calcule directement sans le coût de déquantification continue de `q4_0`.
 2. **Micro-batch (-ub) :** Sous Turnip (Adreno), IADroid limite automatiquement `-ub` à `128` : au-delà, le GPU est réinitialisé (`ErrorDeviceLost`) dès que la conversation dépasse 1024 tokens.
 3. **Threads CPU (-t) :** Réglez `-t 4` (ou `-t 2`) avec déchargement GPU complet (`-ngl 99`). Évitez de saturer tous les cœurs CPU pour ne pas entrer en compétition avec le GPU sur le bus mémoire.
 4. **Optimisation Turnip (`/boost-gpu`) :** Active le mode `TU_DEBUG=noconform` et le mode de présentation `mailbox` à latence minimale.
+
+> 🧪 **OpenCL (expérimental, non intégré) :** le backend OpenCL de llama.cpp fonctionne sous Termux avec le pilote Qualcomm (`LD_LIBRARY_PATH=/vendor/lib64`). Il a le meilleur prefill (493 t/s sur Gemma E2B), mais le pilote plante sur les modèles Q4_K, et la génération reste plus lente que sur CPU quand la conversation s'allonge.
 
 ---
 

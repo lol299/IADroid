@@ -104,6 +104,8 @@ def print_help_table():
     table.add_row("/profil_Prompt_Systeme", "<nom>", "Afficher et modifier directement le prompt système du profil")
     table.add_row("/device", "<gpu|cpu> [ngl]", "Basculer entre GPU (Vulkan) et CPU (avec nb de couches ngl optionnel)")
     table.add_row("/fa", "<on|off>", "Activer ou désactiver Flash Attention (-fa)")
+    table.add_row("/mtp", "<auto|on|off>", "Décodage spéculatif MTP (modèles qui l'embarquent, ex. Qwen3.5) : +10 à +35 % en CPU")
+    table.add_row("/quantize", "[Q4_0|Q8_0|…]", "Convertir le modèle du profil (Q4_0 : le plus rapide en mode CPU)")
     table.add_row("/effort", "<level>", "Régler l'effort de réflexion (minimal|low|medium|high|xhigh|off)")
     table.add_row("/think", "<on|off>", "Activer ou désactiver rapidement le mode réflexion (Thinking)")
     table.add_row("/show-think", "<on|off>", "Aperçu de la réflexion (ON: 5 mots en direct, OFF: masqué)")

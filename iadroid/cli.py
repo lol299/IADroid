@@ -33,7 +33,11 @@ from .config import (
     LLAMA_CLI_PATH,
     ensure_directories,
     get_ram_info,
-    get_gpu_type
+    get_gpu_type,
+    MODELS_DIR,
+    gguf_has_mtp,
+    mtp_active,
+    get_quantize_path
 )
 from .banner import display_welcome_banner, print_help_table
 from .preset_manager import PresetManager, is_llama_running, stop_llama_processes
@@ -41,7 +45,7 @@ from .wizard import PresetWizard
 from .builder import LlamaBuilder
 from .server import LlamaServer
 from .crash_handler import handle_crash
-from .agent import Agent, TOOL_LABELS, SHARED_STORAGE, short as short_path
+from .agent import Agent, ShellJob, TOOL_LABELS, SHARED_STORAGE, short as short_path
 from . import memory
 
 console = Console()
@@ -469,6 +473,8 @@ class IADroidCompleter(Completer):
             "/device",
             "/effort",
             "/jobs",
+            "/mtp",
+            "/quantize",
             "/think",
             "/show-think",
             "/fa",
@@ -581,6 +587,14 @@ class IADroidCompleter(Completer):
             sub_prefix = words[1] if len(words) > 1 and not text.endswith(" ") else ""
             for opt in ("on", "off"):
                 if opt.startswith(sub_prefix):
+                    yield Completion(opt, start_position=-len(sub_prefix))
+            return
+
+        if words[0] in ("/mtp", "/quantize"):
+            sub_prefix = words[1] if len(words) > 1 and not text.endswith(" ") else ""
+            opts = ("auto", "on", "off") if words[0] == "/mtp" else IADroidCLI.QUANT_TYPES
+            for opt in opts:
+                if opt.lower().startswith(sub_prefix.lower()):
                     yield Completion(opt, start_position=-len(sub_prefix))
             return
 
@@ -1010,6 +1024,7 @@ class IADroidCLI:
                 else:
                     ngl_val = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
                     self.manager.set_device_mode(active_name, mode, ngl=ngl_val)
+                    self._cpu_hints(self.manager.get_active_preset())
                     if self.server.is_ready():
                         console.print(f"[cyan]Redémarrage du modèle en mode {mode.upper()}...[/cyan]")
                         self._start_server_live(self.manager.get_active_preset())
@@ -1041,6 +1056,16 @@ class IADroidCLI:
                     self.manager.set_flash_attention(active_name, False)
                 else:
                     console.print("[yellow]Usage : /fa <on|off>[/yellow]")
+            return True
+
+        # /mtp <auto|on|off> : décodage spéculatif par les couches MTP du modèle
+        elif cmd == "/mtp":
+            self._cmd_mtp(arg)
+            return True
+
+        # /quantize [type] : convertir le modèle du profil (Q4_0 par défaut, le plus rapide en CPU)
+        elif cmd == "/quantize":
+            self._cmd_quantize(arg)
             return True
 
         # /effort <minimal|low|medium|high|xhigh|off>
@@ -1336,6 +1361,129 @@ class IADroidCLI:
                           "sans confirmation dans les dossiers autorisés. [dim](hors de ces dossiers : confirmation)[/dim]")
         else:
             console.print("Permissions : [bold cyan]ask[/bold cyan] — confirmation avant chaque écriture, modification ou commande.")
+
+    def _cpu_hints(self, preset):
+        """Après /device cpu : conseils mesurés (Q4_0, MTP)."""
+        if not preset or preset.get("hardware", {}).get("device") != "cpu":
+            return
+        model = os.path.basename(preset.get("model_path") or "")
+        if not re.search(r"q4_0", model, re.I):
+            console.print("[dim]💡 En CPU, un modèle Q4_0 traite le prompt bien plus vite (48 t/s contre 31 t/s "
+                          "pour Qwen3.5-9B Q4_K_M, mesuré sur Snapdragon 8 Gen 3) : /quantize.[/dim]")
+        if mtp_active(preset):
+            console.print("[dim]⚡ Décodage spéculatif MTP activé pour ce modèle (/mtp).[/dim]")
+
+    def _cmd_mtp(self, arg: str):
+        """/mtp [auto|on|off]"""
+        name = self.manager.get_active_preset_name()
+        preset = self.manager.get_active_preset()
+        if not name or not preset:
+            console.print("[yellow]Aucun profil actif.[/yellow]")
+            return
+        has = gguf_has_mtp(preset.get("model_path") or "")
+        opt = arg.lower().strip()
+        if not opt:
+            mode = preset.get("hardware", {}).get("speculative", "auto")
+            console.print(f"Décodage spéculatif MTP : réglage [bold]{mode}[/bold] · "
+                          + ("[bold green]actif[/bold green]" if mtp_active(preset) else "[yellow]inactif[/yellow]"))
+            console.print("  Le modèle " + ("[green]contient[/green]" if has else "[yellow]ne contient pas[/yellow]")
+                          + " de couches MTP (prédiction de plusieurs tokens à la fois).")
+            console.print("[dim]Usage : /mtp <auto|on|off> · auto = actif en mode CPU uniquement "
+                          "(sur GPU, la vérification des tokens proposés ralentit la génération).[/dim]")
+            return
+        if opt not in ("auto", "on", "off"):
+            console.print("[yellow]Usage : /mtp <auto|on|off>[/yellow]")
+            return
+        self.manager.set_speculative(name, opt)
+        preset = self.manager.get_active_preset()
+        state = "[bold green]actif[/bold green]" if mtp_active(preset) else "[yellow]inactif[/yellow]"
+        console.print(f"✓ MTP réglé sur [bold]{opt}[/bold] : {state}.")
+        if not has and opt != "off":
+            console.print("[yellow]Ce modèle n'a pas de couches MTP : le réglage n'aura aucun effet.[/yellow]")
+        if self.server.is_ready():
+            console.print("[cyan]Redémarrage du modèle pour appliquer le réglage...[/cyan]")
+            self._start_server_live(preset)
+            self._last_status_check = 0.0
+
+    QUANT_TYPES = ("Q4_0", "Q4_1", "IQ4_NL", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0")
+
+    def _cmd_quantize(self, arg: str):
+        """/quantize [type] : convertit le modèle du profil actif (Q4_0 par défaut) dans ~/.iadroid/models."""
+        from rich.prompt import Confirm
+        import shlex
+        name = self.manager.get_active_preset_name()
+        preset = self.manager.get_active_preset()
+        if not name or not preset:
+            console.print("[yellow]Aucun profil actif.[/yellow]")
+            return
+        qtype = (arg.strip() or "Q4_0").upper()
+        if qtype not in self.QUANT_TYPES:
+            console.print(f"[yellow]Usage : /quantize [{'|'.join(self.QUANT_TYPES)}] (Q4_0 par défaut)[/yellow]")
+            return
+        src = preset.get("model_path") or ""
+        if not os.path.isfile(src):
+            console.print(f"[red]Fichier modèle introuvable : {escape(src)}[/red]")
+            return
+        tool = get_quantize_path()
+        if not tool:
+            console.print("[red]llama-quantize introuvable : recompilez llama.cpp avec /cmake-recompiler.[/red]")
+            return
+
+        stem = os.path.splitext(os.path.basename(src))[0]
+        current = re.search(r"(?:^|[.\-_])(I?Q\d\w*|BF16|F16|F32)$", stem, re.I)
+        if current and current.group(1).upper() == qtype:
+            console.print(f"[green]Le modèle est déjà en {qtype}.[/green]")
+            return
+        base = stem[:current.start()] if current else stem
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        out = MODELS_DIR / f"{base}-{qtype}.gguf"
+
+        size = os.path.getsize(src)
+        console.print(f"[bold]Conversion en {qtype}[/bold] : {escape(os.path.basename(src))} → {escape(short_path(str(out)))}")
+        requant = not (current and current.group(1).upper() in ("BF16", "F16", "F32"))
+        if requant:
+            console.print("[dim]Le modèle source est déjà quantifié : la conversion fait perdre un peu de qualité. "
+                          "L'idéal est de télécharger directement un GGUF dans ce format.[/dim]")
+        if out.exists():
+            console.print(f"[yellow]{escape(short_path(str(out)))} existe déjà.[/yellow]")
+            if not Confirm.ask("  L'utiliser sans reconvertir ?", default=True):
+                return
+        else:
+            free = shutil.disk_usage(str(MODELS_DIR)).free
+            if free < size * 1.05:
+                console.print(f"[red]Espace insuffisant : {free / 1e9:.1f} Go libres, ~{size / 1e9:.1f} Go nécessaires.[/red]")
+                return
+            if not Confirm.ask(f"  Lancer la conversion (~{size / 1e9:.1f} Go à écrire, environ une minute) ?", default=True):
+                return
+            threads = preset.get("hardware", {}).get("cpu_threads", 4)
+            cmd = (f"{shlex.quote(str(tool))} {'--allow-requantize ' if requant else ''}"
+                   f"{shlex.quote(src)} {shlex.quote(str(out))} {qtype} {threads}")
+            job = ShellJob(cmd)
+            try:
+                self.agent.follow(job, 7200)
+            except KeyboardInterrupt:
+                out.unlink(missing_ok=True)
+                console.print("[yellow]Conversion annulée.[/yellow]")
+                return
+            if job.code != 0 or not out.exists():
+                out.unlink(missing_ok=True)
+                console.print(f"[red]✗ Échec de la conversion (code {job.code}).[/red]")
+                for line in job.output().strip().splitlines()[-3:]:
+                    console.print(Text("    " + line, style="dim"))
+                return
+            console.print(f"[bold {ANDROID_GREEN}]✓ Modèle converti en {job.elapsed:.0f}s : "
+                          f"{os.path.getsize(out) / 1e9:.2f} Go[/bold {ANDROID_GREEN}]")
+
+        if Confirm.ask(f"  Utiliser ce modèle dans le profil '{name}' ?", default=True):
+            self.manager.set_model_path(name, str(out))
+            console.print(f"[green]✓ Profil '{escape(name)}' mis à jour.[/green]")
+            preset = self.manager.get_active_preset()
+            if preset.get("hardware", {}).get("device") != "cpu":
+                console.print("[dim]💡 Le Q4_0 donne le meilleur résultat en CPU : /device cpu.[/dim]")
+            if self.server.is_ready():
+                console.print("[cyan]Rechargement du modèle...[/cyan]")
+                self._start_server_live(preset)
+                self._last_status_check = 0.0
 
     def _cmd_jobs(self, arg: str):
         """/jobs [kill <id>|kill all] : commandes lancées en arrière-plan par l'agent."""

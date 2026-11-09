@@ -19,6 +19,7 @@ from .config import (
     ensure_directories,
     get_default_preset,
     effective_ubatch,
+    runtime_args,
     ANDROID_GREEN
 )
 
@@ -181,16 +182,40 @@ class PresetManager:
             console.print("[red]Le mode doit être 'cpu' ou 'gpu'.[/red]")
             return False
 
-        data.setdefault("hardware", {})
-        data["hardware"]["device"] = device
+        hw = data.setdefault("hardware", {})
+        hw["device"] = device
         if ngl is not None:
-            data["hardware"]["ngl"] = max(0, ngl)
+            hw["ngl"] = max(0, ngl)
         else:
-            data["hardware"]["ngl"] = 99 if device == "gpu" else 0
+            hw["ngl"] = 99 if device == "gpu" else 0
+        # En CPU, la vitesse dépend du nombre de threads : gros cœurs uniquement
+        if device == "cpu":
+            from .config import recommended_cpu_threads
+            hw["cpu_threads"] = recommended_cpu_threads()
 
         self.save_preset(name, data)
         status_color = "green" if device == "gpu" else "yellow"
-        console.print(f"[{status_color}]✓ Profil '{name}' configuré en mode {device.upper()} (ngl: {data['hardware']['ngl']})[/{status_color}]")
+        extra = f", {hw['cpu_threads']} threads" if device == "cpu" else ""
+        console.print(f"[{status_color}]✓ Profil '{name}' configuré en mode {device.upper()} (ngl: {hw['ngl']}{extra})[/{status_color}]")
+        return True
+
+    def set_speculative(self, name: str, mode: str) -> bool:
+        """Décodage spéculatif MTP (/mtp <auto|on|off>)."""
+        data = self.load_preset(name)
+        if not data:
+            console.print(f"[red]Profil '{name}' introuvable.[/red]")
+            return False
+        data.setdefault("hardware", {})["speculative"] = mode
+        self.save_preset(name, data)
+        return True
+
+    def set_model_path(self, name: str, model_path: str) -> bool:
+        """Change le fichier modèle d'un profil (après /quantize)."""
+        data = self.load_preset(name)
+        if not data:
+            return False
+        data["model_path"] = model_path
+        self.save_preset(name, data)
         return True
 
     def set_flash_attention(self, name: str, enabled: bool) -> bool:
@@ -299,6 +324,7 @@ class PresetManager:
         ctx = preset_data.get("context", {})
         ctx_size = ctx.get("ctx_size", 4096)
         cmd.extend(["-c", str(ctx_size)])
+        cmd.extend(runtime_args(preset_data, server=False))
 
         # Prompt système (en mode conversation -cnv, utiliser --system-prompt)
         sys_prompt = ctx.get("system_prompt", "")
@@ -365,6 +391,7 @@ class PresetManager:
 
         ctx_size = preset_data.get("context", {}).get("ctx_size", 4096)
         cmd.extend(["-c", str(ctx_size)])
+        cmd.extend(runtime_args(preset_data, server=False))
 
         sampling = preset_data.get("sampling", {})
         for param, flag in [
@@ -422,6 +449,7 @@ class PresetManager:
 
         ctx_size = preset_data.get("context", {}).get("ctx_size", 4096)
         cmd.extend(["-c", str(ctx_size)])
+        cmd.extend(runtime_args(preset_data))
 
         cmd.extend(["--host", host, "--port", str(port)])
         return cmd
