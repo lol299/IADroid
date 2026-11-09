@@ -19,6 +19,11 @@ BIN_DIR = IADROID_HOME / "bin"
 LOGS_DIR = IADROID_HOME / "logs"
 ACTIVE_PRESET_FILE = IADROID_HOME / "active_preset.txt"
 
+# Mode agent : dossier de travail de l'IA, notes mémorisées, réglages (permissions, dossiers autorisés)
+WORKSPACE_DIR = IADROID_HOME / "workspace"
+MEMORY_DIR = IADROID_HOME / "memory"
+AGENT_SETTINGS_FILE = IADROID_HOME / "agent.json"
+
 # Chemins binaires par défaut
 LLAMA_CLI_PATH = BIN_DIR / "llama-cli"
 LLAMA_SERVER_PATH = BIN_DIR / "llama-server"
@@ -211,7 +216,7 @@ def effective_ubatch(hw: dict) -> tuple:
 
 def ensure_directories():
     """Crée l'arborescence des dossiers et règle la liaison du pilote GPU Vulkan sous Termux."""
-    for d in (PRESETS_DIR, MODELS_DIR, BIN_DIR, LOGS_DIR):
+    for d in (PRESETS_DIR, MODELS_DIR, BIN_DIR, LOGS_DIR, WORKSPACE_DIR, MEMORY_DIR):
         d.mkdir(parents=True, exist_ok=True)
     ensure_vulkan_link()
 

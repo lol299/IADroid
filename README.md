@@ -51,6 +51,8 @@
 * 📊 **Barre d'État Inférieure Dynamique :** Affichage en temps réel de la vitesse en `t/s`, du ratio de contexte tokens utilisé, de la RAM système disponible/occupée et du statut du serveur (`● Prêt (VRAM)`, `⏳ Chargement...`, `○ Arrêté`).
 * 📁 **Gestionnaire de Profils (Presets) :** Créez, configurez et basculez entre plusieurs modèles GGUF en un éclair (`/create-preset`, `/load`, `/profil_config`).
 * 🛑 **Contrôle Total de la Mémoire :** Démarrage transparent de `llama-server` en arrière-plan et libération instantanée de la RAM et de la VRAM (`/stop`).
+* 🤖 **Mode Agent :** L'IA lit et modifie vos fichiers, lance des commandes Termux (sortie en direct, arrière-plan pour les commandes longues), cherche sur le web et se souvient de vous, avec confirmation de chaque action sensible (`/agent on`).
+* ❗ **Commandes Directes `!` :** Lancez un script depuis la barre de prompt (`!python test.py`) ; sa sortie est transmise à l'IA avec votre message suivant.
 * 🛠️ **Suite de Maintenance CMake Intégrée :** Diagnostic GPU automatique (`/check-gpu`), boost de fréquence (`/boost-gpu`), gestionnaire de threads anti-crash Signal 9 (`/cmake-thread-compile`) et recompilation assistée (`/cmake-recompiler`).
 
 ---
@@ -146,6 +148,12 @@ Vous arrivez sur l'interface épurée avec la mascotte Bugdroid, la ligne de sai
 | **`/cmake-recompiler`** | | Met à jour les sources `llama.cpp` (`git pull`) et recompile proprement. |
 | **`/cmake-del-cache`** | | Supprime le cache de build CMake pour repartir sur une installation propre. |
 | **`/llama-cli`** | | Lance une session brute interactive avec `llama-cli` (mode expert / débug). |
+| **`/agent`** | `<on\|off>` | Mode agent : l'IA peut lire, écrire et modifier des fichiers, lancer des commandes Termux et consulter le web (`/agent web on\|off`, `/agent steps N`). |
+| **`/allow`** | `[chemin\|all\|remove <chemin>]` | Dossiers autorisés pour l'agent, en plus de `~/.iadroid/workspace`. `all` autorise Termux et `/storage/emulated/0`. |
+| **`/permissions`** | `<ask\|auto>` | `ask` : confirmation avant chaque écriture ou commande. `auto` : tout est autorisé dans les dossiers autorisés. |
+| **`/memory`** | `[del <nom>\|clear]` | Affiche ou supprime les notes que l'IA garde sur vous d'une conversation à l'autre. |
+| **`/jobs`** | `[kill <id>\|kill all]` | Commandes que l'agent a lancées en arrière-plan : état, dernières lignes de sortie, arrêt. L'agent y passe une commande longue (`pkg upgrade`, compilation…) au lieu de bloquer, et une pastille ◐ l'indique dans la barre d'état. |
+| **`!`** | `<commande>` | Lance une commande ou un script directement dans le terminal (ex. `!python test.py`, `!cd projet`). L'affichage et le clavier sont ceux du script ; Ctrl+C n'arrête que lui. La sortie est jointe à votre prochain message pour que l'IA puisse s'en servir. |
 | **`/help`** | | Affiche le tableau complet des commandes. |
 | **`/clear`** | | Démarre une nouvelle conversation : efface l'écran et réinitialise le contexte du modèle. |
 | **`/exit`** *(ou `/quit`)* | | Arrête les processus actifs et quitte IADroid. |
@@ -166,6 +174,44 @@ IADroid intègre un parseur de flux streaming dédié ([`ThinkStreamParser`](iad
 
 ### 3. Niveaux d'effort (`/effort`)
 Réglez le niveau de raisonnement via `/effort <minimal|low|medium|high|xhigh|off>`. Chaque niveau ajuste le budget indicatif de tokens alloués à la réflexion.
+
+---
+
+## 🤖 Mode Agent : l'IA agit sur votre téléphone
+
+Avec **`/agent on`**, le modèle ne se contente plus de répondre : il utilise des outils, à la manière de *Claude Code*. Il fonctionne avec les modèles qui gèrent les appels d'outils natifs (testé sur Qwen3.5-9B).
+
+| Outil | Affichage | Rôle |
+| :--- | :--- | :--- |
+| `list_dir`, `read_file`, `search_files` | `List`, `Read`, `Search` | Explorer et lire des fichiers |
+| `write_file`, `edit_file` | `Write`, `Update` | Créer ou modifier un fichier (diff coloré) |
+| `run_command`, `command_status` | `Bash`, `BashOutput` | Lancer une commande Termux, suivre une commande d'arrière-plan |
+| `web_search`, `web_fetch` | `WebSearch`, `Fetch` | Chercher sur le web (DuckDuckGo, Bing en secours) et lire une page |
+| `memory_save`, `memory_delete` | `Memory`, `Forget` | Retenir des informations sur vous d'une conversation à l'autre |
+
+```text
+● Bash(pkg install -y python git) · 14 tokens
+⠹  en cours · 34s · 128 lignes · ~2100 tokens
+     Unpacking python (3.14.8) …
+● Fetch(https://www.motogp.com/fr/gp-results) · 22 tokens
+  ⎿  Résultats et classement MotoGP · 8000 caractères · 2650 tokens lus
+```
+
+* **Sécurité :** l'agent travaille dans `~/.iadroid/workspace`. `/allow` ajoute d'autres dossiers, et tout accès en dehors demande une confirmation. En mode `/permissions ask` (par défaut), chaque écriture et chaque commande sont confirmées (`o` oui · `t` toujours · `n` non, avec une consigne facultative).
+* **Commandes en direct :** la sortie d'une commande défile pendant son exécution, avec sa durée et ses tokens. Ctrl+C l'arrête.
+* **Arrière-plan :** une commande longue (mise à jour de paquets, compilation…) passe en arrière-plan au lieu de bloquer l'agent, soit à sa demande, soit au bout du délai. Une pastille `◐` l'indique dans la barre d'état, l'IA est prévenue quand elle se termine, et `/jobs` les liste ou les arrête.
+* **Tokens :** chaque appel indique les tokens écrits par le modèle, et chaque résultat les tokens qu'il va lire. Quand le contexte est presque plein, les anciens résultats d'outils sont raccourcis automatiquement.
+
+### Lancer vous-même une commande : `!`
+
+Commencez votre ligne par `!` pour exécuter une commande ou un script **sans passer par l'IA** :
+
+```text
+! python mon_script.py
+! cd ~/projet
+```
+
+Le script s'affiche et se contrôle comme dans Termux (couleurs, saisies au clavier, Ctrl+C). Sa sortie est ensuite jointe à votre prochain message : demandez simplement « corrige l'erreur ci-dessus ».
 
 ---
 
@@ -233,11 +279,13 @@ IADroid s'appuie sur une architecture **Client ↔ Serveur local** via `llama-se
 ~/IADroid/
 ├── iadroid/
 │   ├── __init__.py           # Version et métadonnées du package
+│   ├── agent.py              # Mode agent : outils, permissions, commandes en arrière-plan
 │   ├── banner.py             # Mascotte Android pixel Bugdroid & bannières
 │   ├── builder.py            # Maintenance CMake, compilateur & diagnostic GPU
 │   ├── cli.py                # Interface REPL interactive style Claude Code
 │   ├── config.py             # Chemins (~/.iadroid), constantes et détection GPU/RAM
 │   ├── crash_handler.py      # Gestionnaire d'erreurs et rapports de crash
+│   ├── memory.py             # Notes mémorisées par l'agent (~/.iadroid/memory)
 │   ├── preset_manager.py     # Gestion JSON des profils, matériel & processus
 │   ├── server.py             # Moteur llama-server en arrière-plan & client SSE
 │   ├── updater.py            # Système de mise à jour automatique via GitHub (/update)

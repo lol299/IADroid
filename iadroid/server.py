@@ -297,20 +297,53 @@ class LlamaServer:
         self.active_preset_name = None
         return True
 
+    def count_tokens(self, text: str) -> int:
+        """
+        Nombre exact de tokens d'un texte, via l'endpoint /tokenize du serveur (rapide :
+        pas d'inférence). Si le serveur ne répond pas, estimation à ~3 caractères par token.
+        """
+        if not text:
+            return 0
+        try:
+            req = urllib.request.Request(
+                f"{self.base_url}/tokenize",
+                data=json.dumps({"content": text}).encode("utf-8"),
+                headers={"Content-Type": "application/json", "Connection": "close"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                tokens = json.loads(resp.read().decode("utf-8")).get("tokens")
+                if isinstance(tokens, list):
+                    return len(tokens)
+        except Exception:
+            pass
+        return max(1, len(text) // 3)
+
     def stream_chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
         sampling: Dict[str, Any],
         on_token: Callable[[str], None],
         reasoning_effort: Optional[str] = None,
-        thinking_enabled: Optional[bool] = None
+        thinking_enabled: Optional[bool] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        on_tool_progress: Optional[Callable[[int, str, str, int], None]] = None
     ) -> Tuple[str, float, int]:
         """
         Envoie une requête de chat au format standard OpenAI /v1/chat/completions
         et diffuse la réponse token par token via Server-Sent Events (SSE).
         Gère à la fois le flux de réponse standard (content) et le flux de réflexion (reasoning_content).
         Retourne (texte_complet, durée_secondes, nombre_tokens).
+
+        Mode agent : si `tools` est fourni, les appels d'outils du modèle (delta.tool_calls)
+        sont assemblés dans self.last_tool_calls :
+          [{"id", "name", "arguments" (JSON texte), "tokens"}]
+        on_tool_progress(index, nom, arguments_partiels, tokens) est appelé à chaque morceau.
+        self.last_usage contient l'usage renvoyé par le serveur (prompt_tokens, completion_tokens) s'il existe.
         """
+        self.last_tool_calls = []
+        self.last_usage = None
+        self.last_finish_reason = None
         # Vérifier que le processus serveur est toujours vivant avant d'envoyer
         proc = self.process
         if proc and proc.poll() is not None:
@@ -337,8 +370,12 @@ class LlamaServer:
             "top_p": sampling.get("top_p", 0.9),
             "top_k": sampling.get("top_k", 40),
             "min_p": sampling.get("min_p", 0.05),
-            "repeat_penalty": sampling.get("repeat_penalty", 1.1)
+            "repeat_penalty": sampling.get("repeat_penalty", 1.1),
+            # Usage réel (tokens du prompt + générés) dans le dernier morceau : compteur de contexte exact
+            "stream_options": {"include_usage": True}
         }
+        if tools:
+            payload["tools"] = tools
 
         # Contrôle réel de la réflexion via le template de chat du modèle (Qwen3/3.5, DeepSeek, etc.).
         # Sans cela, /think off n'était qu'une consigne texte que le modèle pouvait ignorer.
@@ -363,6 +400,7 @@ class LlamaServer:
         start_time = time.time()
         in_reasoning_mode = False
         got_done = False
+        tool_calls: Dict[int, Dict[str, Any]] = {}
 
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
@@ -382,8 +420,12 @@ class LlamaServer:
 
                     try:
                         chunk = json.loads(data_str)
+                        if chunk.get("usage"):
+                            self.last_usage = chunk["usage"]
                         choices = chunk.get("choices", [])
                         if choices:
+                            if choices[0].get("finish_reason"):
+                                self.last_finish_reason = choices[0]["finish_reason"]
                             delta = choices[0].get("delta", {})
 
                             # Support des tokens de réflexion (llama.cpp b4500+, DeepSeek, Qwen2.5, Gemma)
@@ -403,6 +445,25 @@ class LlamaServer:
                                 token_count += 1
                                 full_response.append(content)
                                 on_token(content)
+
+                            # Appels d'outils (mode agent), diffusés morceau par morceau
+                            for tc in delta.get("tool_calls") or []:
+                                if in_reasoning_mode:
+                                    in_reasoning_mode = False
+                                    on_token("</think>")
+                                idx = tc.get("index", 0)
+                                entry = tool_calls.setdefault(idx, {"id": "", "name": "", "arguments": "", "tokens": 0})
+                                if tc.get("id"):
+                                    entry["id"] = tc["id"]
+                                fn = tc.get("function") or {}
+                                entry["name"] += fn.get("name") or ""
+                                entry["arguments"] += fn.get("arguments") or ""
+                                entry["tokens"] += 1
+                                token_count += 1
+                                if on_tool_progress:
+                                    on_tool_progress(idx, entry["name"], entry["arguments"], entry["tokens"])
+                    except KeyboardInterrupt:
+                        raise
                     except Exception:
                         continue
 
@@ -430,6 +491,11 @@ class LlamaServer:
                 error_body = e.read().decode("utf-8", errors="replace")[:500]
             except Exception:
                 pass
+            if e.code == 400 and "context" in error_body.lower():
+                raise RuntimeError(
+                    "Contexte plein : la conversation dépasse la taille de contexte du profil. "
+                    "Tapez /clear pour repartir d'une nouvelle conversation."
+                )
             raise RuntimeError(
                 f"Erreur HTTP {e.code} du serveur llama-server : {e.reason}\n{error_body}".strip()
             )
@@ -440,6 +506,7 @@ class LlamaServer:
         if not got_done:
             raise RuntimeError(self._interrupted_stream_message(token_count))
 
+        self.last_tool_calls = [tool_calls[i] for i in sorted(tool_calls) if tool_calls[i]["name"]]
         elapsed = max(0.01, time.time() - start_time)
         return "".join(full_response), elapsed, token_count
 

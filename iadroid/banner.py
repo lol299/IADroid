@@ -120,6 +120,12 @@ def print_help_table():
     table.add_row("/run", "", "Démarrer le modèle actif en arrière-plan et activer la conversation")
     table.add_row("/stop", "", "Arrêter le serveur actif et libérer immédiatement la RAM et le GPU")
     table.add_row("/llama-cli", "", "Lancer une session brute interactive avec llama-cli (expert débug)")
+    table.add_row("/agent", "<on|off>", "Mode agent : l'IA lit/écrit des fichiers, lance des commandes, va sur le web (web on|off, steps N)")
+    table.add_row("/allow", "[chemin|all|remove]", "Dossiers autorisés pour l'agent (all : Termux + /storage/emulated/0)")
+    table.add_row("/permissions", "<ask|auto>", "ask : confirmer chaque écriture/commande · auto : tout autoriser")
+    table.add_row("/memory", "[del <nom>|clear]", "Notes que l'IA garde sur vous d'une conversation à l'autre")
+    table.add_row("/jobs", "[kill <id>|kill all]", "Commandes lancées en arrière-plan par l'agent (sortie, état, arrêt)")
+    table.add_row("!", "<commande>", "Lancer une commande ou un script dans le terminal (sortie jointe au prochain message)")
     table.add_row("/help", "", "Afficher cette aide")
     table.add_row("/exit", "", "Quitter IADroid")
 

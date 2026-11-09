@@ -38,3 +38,6 @@ Thumbs.db
 
 # Configuration locale du déploiement SSH (scripts/deploy.sh)
 .deploy.env
+
+# Notes de développement Claude Code (locales, non publiées)
+CLAUDE.md
