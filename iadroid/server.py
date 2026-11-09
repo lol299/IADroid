@@ -31,7 +31,7 @@ from .config import (
 )
 from .preset_manager import is_llama_running, stop_llama_processes
 
-console = Console()
+from .config import console  # console partagée : une seule instance pour que rich.Live gère tous les affichages
 
 class LlamaServer:
     def __init__(self, host: str = "127.0.0.1", port: int = 8080):
@@ -130,7 +130,7 @@ class LlamaServer:
             return False
         except FileNotFoundError:
             console.print(f"[red]Fichier modèle introuvable : {model_path}[/red]")
-            console.print("[yellow]Vérifiez le chemin du fichier avec /profil_config ou téléchargez un modèle.[/yellow]")
+            console.print("[yellow]Vérifiez le chemin du fichier avec /profil ou téléchargez un modèle.[/yellow]")
             return False
         except Exception as e:
             console.print(f"[red]Erreur lors de l'accès au fichier modèle : {e}[/red]")
@@ -334,7 +334,9 @@ class LlamaServer:
         reasoning_effort: Optional[str] = None,
         thinking_enabled: Optional[bool] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
-        on_tool_progress: Optional[Callable[[int, str, str, int], None]] = None
+        on_tool_progress: Optional[Callable[[int, str, str, int], None]] = None,
+        thinking_budget: Optional[int] = None,
+        native_effort: bool = False
     ) -> Tuple[str, float, int]:
         """
         Envoie une requête de chat au format standard OpenAI /v1/chat/completions
@@ -388,9 +390,15 @@ class LlamaServer:
         # Sans cela, /think off n'était qu'une consigne texte que le modèle pouvait ignorer.
         if thinking_enabled is not None:
             kwargs = {"enable_thinking": bool(thinking_enabled)}
-            if thinking_enabled and reasoning_effort and reasoning_effort != "off":
+            if thinking_enabled and native_effort and reasoning_effort and reasoning_effort != "off":
                 kwargs["reasoning_effort"] = reasoning_effort
             payload["chat_template_kwargs"] = kwargs
+            # Effort pour les modèles dont le template ignore reasoning_effort (Qwen3.5, Gemma 4…) :
+            # llama-server coupe la réflexion après N tokens et enchaîne sur la réponse.
+            # Mesuré sur Gemma 4 E2B avec 64 tokens : réflexion de 113 à 36 mots, réponse juste.
+            if thinking_enabled and thinking_budget and thinking_budget > 0:
+                payload["thinking_budget_tokens"] = int(thinking_budget)
+                payload["reasoning_budget_message"] = "\n\nOkay, time is up: I must answer now.\n"
 
         req = urllib.request.Request(
             url,

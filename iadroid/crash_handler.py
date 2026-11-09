@@ -17,7 +17,7 @@ from rich.panel import Panel
 from .config import IADROID_HOME, get_ram_info
 from .version import __version__
 
-console = Console()
+from .config import console  # console partagée : une seule instance pour que rich.Live gère tous les affichages
 
 def get_downloads_dir() -> Path:
     """Recherche le dossier Téléchargements accessible sur Android Termux."""

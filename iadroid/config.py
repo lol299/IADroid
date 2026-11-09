@@ -5,6 +5,13 @@ IADroid - Configuration & Chemins
 import os
 import sys
 from pathlib import Path
+from rich.console import Console
+
+# Console rich UNIQUE pour tout IADroid. Avec plusieurs instances, un message imprimé par un
+# autre module pendant un affichage en direct (rich.Live : chargement, génération) n'est pas
+# compté par Live, qui n'efface plus toutes ses lignes : la ligne d'effort et l'indicateur
+# de chargement restaient dans la conversation.
+console = Console()
 
 # Détection de l'environnement (Termux vs autre système)
 IS_TERMUX = "com.termux" in os.environ.get("PREFIX", "") or os.path.exists("/data/data/com.termux")
@@ -95,25 +102,26 @@ def runtime_args(preset_data: dict, server: bool = True) -> list:
     return args
 
 
-_MTP_CACHE = {}
+_GGUF_CACHE = {}
 
 
-def gguf_has_mtp(model_path: str) -> bool:
+def gguf_metadata(model_path: str) -> dict:
     """
-    Vrai si le modèle GGUF embarque des couches de prédiction multi-tokens (MTP,
-    clé « <arch>.nextn_predict_layers » > 0, ex. Qwen3.5). Elles permettent le décodage
-    spéculatif sans modèle brouillon (--spec-type draft-mtp). Lit seulement les métadonnées.
+    Métadonnées scalaires et textes d'un modèle GGUF (les tableaux, comme le vocabulaire, sont
+    sautés). Lit seulement l'en-tête (~0,4 s pour 150 000 tokens de vocabulaire), mis en cache
+    tant que le fichier ne change pas. Dictionnaire vide si le fichier est illisible.
     """
     import struct
     try:
         key = (model_path, os.path.getmtime(model_path))
-    except OSError:
-        return False
-    if key in _MTP_CACHE:
-        return _MTP_CACHE[key]
+    except (OSError, TypeError):
+        return {}
+    if key in _GGUF_CACHE:
+        return _GGUF_CACHE[key]
 
     sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
-    found = False
+    fmts = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f", 7: "?", 10: "Q", 11: "q", 12: "d"}
+    meta = {}
     try:
         with open(model_path, "rb") as f:
             def rd(fmt):
@@ -136,18 +144,123 @@ def gguf_has_mtp(model_path: str) -> bool:
                     f.seek(sizes[t], 1)
 
             if f.read(4) != b"GGUF":
-                raise ValueError
+                raise ValueError("pas un GGUF")
             rd("I"); rd("Q")
             for _ in range(rd("Q")):
                 k, t = rstr(), rd("I")
-                if k.endswith(".nextn_predict_layers") and t in (4, 5, 10, 11):
-                    found = rd({4: "I", 5: "i", 10: "Q", 11: "q"}[t]) > 0
-                    break
-                skip(t)
+                if t == 8:
+                    meta[k] = rstr()
+                elif t in fmts:
+                    meta[k] = rd(fmts[t])
+                else:
+                    skip(t)
     except Exception:
-        found = False
-    _MTP_CACHE[key] = found
-    return found
+        meta = {}
+    _GGUF_CACHE[key] = meta
+    return meta
+
+
+def gguf_has_mtp(model_path: str) -> bool:
+    """
+    Vrai si le modèle GGUF embarque des couches de prédiction multi-tokens (MTP,
+    clé « <arch>.nextn_predict_layers » > 0, ex. Qwen3.5). Elles permettent le décodage
+    spéculatif sans modèle brouillon (--spec-type draft-mtp).
+    """
+    meta = gguf_metadata(model_path)
+    return any(k.endswith(".nextn_predict_layers") and isinstance(v, int) and v > 0 for k, v in meta.items())
+
+
+def reasoning_caps(model_path: str) -> dict:
+    """
+    Ce que le template de chat du modèle sait faire en matière de réflexion :
+      thinking : le modèle réfléchit (balises <think>, reasoning_content, enable_thinking…) ;
+      toggle   : la réflexion se désactive (variable enable_thinking du template) ;
+      effort   : le template lit reasoning_effort (niveaux natifs). Sinon, IADroid règle
+                 l'effort par un budget de tokens de réflexion (thinking_budget_tokens),
+                 que llama-server applique quel que soit le template ;
+      known    : le template a pu être lu (sinon, tout est supposé possible).
+    Vérifié le 9 novembre 2026 : Qwen3.5, Qwen3.6, Bonsai et Gemma 4 lisent enable_thinking,
+    aucun ne lit reasoning_effort.
+    """
+    tpl = gguf_metadata(model_path).get("tokenizer.chat_template") or ""
+    if not tpl:
+        return {"thinking": True, "toggle": True, "effort": False, "known": False}
+    toggle = "enable_thinking" in tpl
+    thinking = toggle or any(k in tpl for k in ("<think>", "reasoning_content", "thinking"))
+    return {"thinking": thinking, "toggle": toggle, "effort": "reasoning_effort" in tpl, "known": True}
+
+
+# --------------------------------------------------------------------------- capteurs GPU / CPU
+
+_THERMAL_ZONES = None
+
+
+def _read_int(path: str):
+    try:
+        with open(path) as f:
+            return int(f.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _thermal_zones():
+    """(capteurs CPU, capteurs GPU) parmi /sys/class/thermal, lus une seule fois."""
+    global _THERMAL_ZONES
+    if _THERMAL_ZONES is None:
+        import glob
+        cpu, gpu = [], []
+        for z in glob.glob("/sys/class/thermal/thermal_zone*"):
+            try:
+                with open(z + "/type") as f:
+                    t = f.read().strip().lower()
+            except OSError:
+                continue
+            if t.startswith(("cpu-", "cpuss", "cpu_")):
+                cpu.append(z + "/temp")
+            elif t.startswith(("gpu", "mali")):
+                gpu.append(z + "/temp")
+        _THERMAL_ZONES = (cpu, gpu)
+    return _THERMAL_ZONES
+
+
+def _max_temp(paths) -> "int | None":
+    vals = [v for v in (_read_int(p) for p in paths) if v is not None]
+    if not vals:
+        return None
+    t = max(vals)
+    return round(t / 1000) if t > 1000 else t
+
+
+def get_hw_stats(gpu: bool) -> dict:
+    """
+    Température, fréquence et charge du composant qui calcule, lisibles sans root :
+      GPU : {"temp": °C, "freq": "578MHz", "busy": "99%"} (Adreno via /sys/class/kgsl ;
+            Mali : température seule) ;
+      CPU : {"temp": °C, "freq": "2.7GHz", "busy": None} (/proc/stat, nécessaire pour la
+            charge CPU, est interdit aux applications depuis Android 8).
+    Les valeurs illisibles valent None.
+    """
+    cpu_zones, gpu_zones = _thermal_zones()
+    if gpu:
+        k = "/sys/class/kgsl/kgsl-3d0"
+        temp = _read_int(k + "/temp")
+        temp = round(temp / 1000) if temp and temp > 1000 else temp
+        if temp is None:
+            temp = _max_temp(gpu_zones)
+        freq = _read_int(k + "/devfreq/cur_freq")
+        busy = _read_int(k + "/gpu_busy_percentage")
+        return {"temp": temp, "freq": f"{freq // 1_000_000}MHz" if freq else None,
+                "busy": f"{busy}%" if busy is not None else None}
+    freqs = [v for v in (_read_int(f"/sys/devices/system/cpu/cpu{i}/cpufreq/scaling_cur_freq")
+                         for i in range(os.cpu_count() or 8)) if v]
+    return {"temp": _max_temp(cpu_zones),
+            "freq": f"{max(freqs) / 1_000_000:.1f}GHz" if freqs else None, "busy": None}
+
+
+def temp_color(temp) -> str:
+    if temp is None:
+        return "#888888"
+    return "#3DDC84" if temp < 55 else ("#FFD32A" if temp < 75 else "#FF5555")
 
 # Couleurs & Thème UI
 ANDROID_GREEN = "#3DDC84"

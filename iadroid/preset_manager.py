@@ -23,7 +23,7 @@ from .config import (
     ANDROID_GREEN
 )
 
-console = Console()
+from .config import console  # console partagée : une seule instance pour que rich.Live gère tous les affichages
 
 def is_llama_running() -> bool:
     """Vérifie si un processus llama-cli ou llama-server est en cours d'exécution."""
@@ -197,6 +197,20 @@ class PresetManager:
         status_color = "green" if device == "gpu" else "yellow"
         extra = f", {hw['cpu_threads']} threads" if device == "cpu" else ""
         console.print(f"[{status_color}]✓ Profil '{name}' configuré en mode {device.upper()} (ngl: {hw['ngl']}{extra})[/{status_color}]")
+        return True
+
+    def delete_preset(self, name: str) -> bool:
+        """Supprime un profil ; s'il était actif, plus aucun profil n'est actif."""
+        path = self.get_preset_path(name)
+        try:
+            path.unlink()
+        except OSError:
+            return False
+        if self.get_active_preset_name() == name:
+            try:
+                ACTIVE_PRESET_FILE.unlink()
+            except OSError:
+                pass
         return True
 
     def set_speculative(self, name: str, mode: str) -> bool:

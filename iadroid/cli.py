@@ -37,8 +37,15 @@ from .config import (
     MODELS_DIR,
     gguf_has_mtp,
     mtp_active,
-    get_quantize_path
+    get_quantize_path,
+    reasoning_caps,
+    get_hw_stats,
+    temp_color,
+    REASONING_TOKEN_BUDGETS,
 )
+from html import escape as html_escape
+from . import menus
+from .preset_form import edit_preset, pick_preset, effort_note, EFFORT_LEVELS
 from .banner import display_welcome_banner, print_help_table
 from .preset_manager import PresetManager, is_llama_running, stop_llama_processes
 from .wizard import PresetWizard
@@ -48,7 +55,7 @@ from .crash_handler import handle_crash
 from .agent import Agent, ShellJob, TOOL_LABELS, SHARED_STORAGE, short as short_path
 from . import memory
 
-console = Console()
+from .config import console  # console partagée : une seule instance pour que rich.Live gère tous les affichages
 
 # ------------------------------------------------------------------ commandes « ! » de l'utilisateur
 
@@ -467,7 +474,7 @@ class IADroidCompleter(Completer):
             "/run",
             "/stop",
             "/create-preset",
-            "/profil_config",
+            "/profil",
             "/profil_config_env",
             "/profil_Prompt_Systeme",
             "/device",
@@ -516,7 +523,7 @@ class IADroidCompleter(Completer):
             return
 
         # Complétion des arguments de profil
-        if words[0] in ("/load", "/use", "/profil_config", "/profil_config_env", "/profil_Prompt_Systeme"):
+        if words[0] in ("/load", "/use", "/profil", "/profil_config", "/profil_config_env", "/profil_Prompt_Systeme"):
             sub_prefix = words[1] if len(words) > 1 and not text.endswith(" ") else ""
             for name in self.manager.list_presets():
                 if name.startswith(sub_prefix):
@@ -628,6 +635,9 @@ class IADroidCLI:
         self._ram_snapshot = get_ram_info()
         self._monitor_stop = threading.Event()
         self._jobs_snapshot = (0, 0)
+        self._hw_snapshot = None  # (gpu?, get_hw_stats()) : capteurs affichés dans la ligne ❯❯
+        # Effort choisi avec « s » dans le menu /effort : pour cette session seulement (None = profil)
+        self._session_effort = None
 
         # Historique persistant des commandes
         # reserve_space_for_menu=0 : pas de lignes vides réservées pour l'autocomplétion,
@@ -649,6 +659,57 @@ class IADroidCLI:
             'bottom-toolbar.text': 'noinherit default',
         })
 
+    def _effort_state(self, preset=None):
+        """
+        Niveau d'effort réellement appliqué : (effort, couleur, caps, session).
+        Tient compte de /effort … s (réglage pour la session seulement) et des capacités du
+        modèle (reasoning_caps) : un modèle sans réflexion donne effort=None.
+        """
+        preset = preset if preset is not None else (self.manager.get_active_preset() or {})
+        rs = preset.get("reasoning", {})
+        caps = reasoning_caps(preset.get("model_path") or "")
+        session = self._session_effort is not None
+        if not caps["thinking"]:
+            return None, "#777777", caps, False
+        effort = self._session_effort if session else (rs.get("effort", "medium") if rs.get("enabled", True) else "off")
+        if effort == "off" and not caps["toggle"]:
+            effort = "medium"
+        if effort in ("high", "xhigh"):
+            color = "#3DDC84"
+        elif effort in ("medium", "low", "minimal"):
+            color = "#FFD32A"
+        else:
+            color = "#777777"
+        return effort, color, caps, session
+
+    def _effort_tag(self, preset=None):
+        """(texte brut pour la largeur, morceaux (couleur, gras, texte)) de la ligne d'effort."""
+        effort, color, _caps, session = self._effort_state(preset)
+        if effort is None:
+            parts = [("#777777", False, "○ sans réflexion")]
+        else:
+            parts = [(color, True, f"● {effort}")]
+            if session:
+                parts.append(("#FF79C6", False, " (session)"))
+            parts.append(("#777777", False, " · /effort"))
+        return "".join(t for _, _, t in parts), parts
+
+    def _hw_parts(self, preset, fresh: bool = False):
+        """Morceaux (couleur, gras, texte) « 50°C · 578MHz · 99% » du composant qui calcule."""
+        hw = preset.get("hardware", {})
+        on_gpu = hw.get("device", "gpu") == "gpu" and int(hw.get("ngl", 99) or 0) > 0
+        if fresh or self._hw_snapshot is None or self._hw_snapshot[0] != on_gpu:
+            self._hw_snapshot = (on_gpu, get_hw_stats(on_gpu))
+        st = self._hw_snapshot[1]
+        parts = []
+        if st.get("temp") is not None:
+            parts.append((temp_color(st["temp"]), True, f"{st['temp']}°C"))
+        if st.get("freq"):
+            parts.append(("#CCCCCC", False, st["freq"]))
+        if st.get("busy"):
+            parts.append(("#00D8D6", False, st["busy"]))
+        return parts
+
     def get_prompt_message(self):
         """
         En-tête supérieur et barre de prompt style Claude Code (>):
@@ -658,18 +719,11 @@ class IADroidCLI:
         term_width = shutil.get_terminal_size().columns
         width = max(10, min(term_width - 1, 100))
 
-        preset = self.manager.get_active_preset()
-        rs = preset.get("reasoning", {}) if preset else {}
-        effort = rs.get("effort", "medium") if rs.get("enabled", True) else "off"
-
-        if effort in ("high", "xhigh"):
-            effort_color = "#3DDC84"
-        elif effort in ("medium", "low", "minimal"):
-            effort_color = "#FFD32A"
-        else:
-            effort_color = "#777777"
-
-        tag = f"● {effort} · /effort"
+        preset = self.manager.get_active_preset() or {}
+        tag, parts = self._effort_tag(preset)
+        effort_html = "".join(
+            f'<style fg="{c}">{"<b>" if b else ""}{html_escape(t)}{"</b>" if b else ""}</style>'
+            for c, b, t in parts)
         agent_html = ""
         if self.agent.enabled:
             mode = self.agent.settings["mode"]
@@ -683,8 +737,7 @@ class IADroidCLI:
         return HTML(
             f'<style fg="#555555">{" " * pad}</style>'
             f'{agent_html}'
-            f'<style fg="{effort_color}"><b>● {effort}</b></style>'
-            f'<style fg="#777777"> · /effort</style>\n'
+            f'{effort_html}\n'
             f'<style fg="#555555">{"─" * width}</style>\n'
             f'<style fg="#3DDC84"><b>&gt; </b></style>'
         )
@@ -750,6 +803,10 @@ class IADroidCLI:
 
         speed_str = f"{self.last_speed} t/s" if self.last_speed != "--" else "-- t/s"
         dev_color = "#3DDC84" if dev == "GPU" else "#FFD32A"
+        hw_html = "".join(
+            f'<style fg="#555555"> · </style><style fg="{c}">{"<b>" if b else ""}{t}{"</b>" if b else ""}</style>'
+            for c, b, t in self._hw_parts(active_preset))
+        p_name = html_escape(p_name)
         line_border = f'<style fg="#555555">{sep_line}</style>'
         jobs = self._jobs_badge()
         if jobs:
@@ -769,9 +826,7 @@ class IADroidCLI:
                 f' <style fg="#FFD32A"><b>❯❯</b></style> '
                 f'<style fg="#00D8D6"><b>{p_name}</b></style> '
                 f'<style fg="#555555">·</style> '
-                f'<style fg="{dev_color}"><b>{dev}</b></style> '
-                f'<style fg="#555555">·</style> '
-                f'<style fg="#888888">Tapez </style><style fg="#3DDC84"><b>/help</b></style>'
+                f'<style fg="{dev_color}"><b>{dev}</b></style>{hw_html}'
             )
             return HTML(f"{line_border}\n{line_metrics}\n{line_ram}\n{line_info}")
         else:
@@ -790,11 +845,7 @@ class IADroidCLI:
                 f' <style fg="#FFD32A"><b>❯❯</b></style> '
                 f'<style fg="#888888">Profil: </style><style fg="#00D8D6"><b>{p_name}</b></style> '
                 f'<style fg="#555555">·</style> '
-                f'<style fg="{dev_color}"><b>{dev}</b></style> '
-                f'<style fg="#555555">·</style> '
-                f'<style fg="#888888">Tapez </style><style fg="#3DDC84"><b>/help</b></style>'
-                f'<style fg="#888888"> · </style><style fg="#FFD32A"><b>/stop</b></style>'
-                f'<style fg="#888888"> (VRAM)</style>'
+                f'<style fg="{dev_color}"><b>{dev}</b></style>{hw_html}'
             )
             return HTML(f"{line_border}\n{line_metrics}\n{line_info}")
 
@@ -811,18 +862,15 @@ class IADroidCLI:
         now = time.time()
 
         preset = self.manager.get_active_preset() or {}
-        rs = preset.get("reasoning", {})
-        effort = rs.get("effort", "medium") if rs.get("enabled", True) else "off"
-        effort_color = "#3DDC84" if effort in ("high", "xhigh") else ("#FFD32A" if effort in ("medium", "low", "minimal") else "#777777")
-        tag = f"● {effort} · /effort"
+        tag, parts = self._effort_tag(preset)
+        effort_markup = "".join(f"[{'bold ' if b else ''}{c}]{escape(t)}[/]" for c, b, t in parts)
         agent_markup = ""
         if self.agent.enabled:
             mode = self.agent.settings["mode"]
             tag = f"⚙ agent:{mode} · " + tag
             agent_color = "#FF79C6" if mode == "auto" else "#00D8D6"
             agent_markup = f"[bold {agent_color}]⚙ agent:{mode}[/][#777777] · [/]"
-        effort_line = (f"{' ' * max(0, width - len(tag))}{agent_markup}"
-                       f"[bold {effort_color}]● {escape(effort)}[/][#777777] · /effort[/]")
+        effort_line = f"{' ' * max(0, width - len(tag))}{agent_markup}{effort_markup}"
 
         status = live.get("status")
         elapsed = int(now - live.get("t0", now))
@@ -856,8 +904,10 @@ class IADroidCLI:
         p_name = escape(preset.get("name", "Inconnu"))
         dev = preset.get("hardware", {}).get("device", "gpu").upper()
         dev_color = "#3DDC84" if dev == "GPU" else "#FFD32A"
+        hw_markup = "".join(f"[#555555] · [/][{'bold ' if b else ''}{c}]{t}[/]"
+                            for c, b, t in self._hw_parts(preset, fresh=True))
         info = (f" [bold #FFD32A]❯❯[/] [#888888]Profil: [/][bold #00D8D6]{p_name}[/] "
-                f"[#555555]·[/] [bold {dev_color}]{dev}[/]")
+                f"[#555555]·[/] [bold {dev_color}]{dev}[/]{hw_markup}")
 
         jobs = self._jobs_badge()
         if jobs:
@@ -919,6 +969,13 @@ class IADroidCLI:
                     self._jobs_snapshot = jobs
                     changed = True
 
+                if self._hw_snapshot is not None:
+                    on_gpu, old = self._hw_snapshot
+                    st = get_hw_stats(on_gpu)
+                    if st.get("temp") is not None and abs(st["temp"] - (old.get("temp") or 0)) >= 3:
+                        self._hw_snapshot = (on_gpu, st)
+                        changed = True
+
                 status = self.server.get_status()
                 self._last_status_check = time.time()
                 if status != self._cached_server_status:
@@ -979,18 +1036,19 @@ class IADroidCLI:
             console.print(f"[dim]✓ Nouvelle conversation (contexte réinitialisé).[/dim]")
             return True
 
-        # /create-preset
-        elif cmd == "/create-preset":
-            self.wizard.run_wizard()
+        # /create-preset : formulaire de nouveau profil
+        elif cmd in ("/create-preset", "/create"):
+            self._cmd_profil("__new__")
             return True
 
-        # /profil_config <nom>
-        elif cmd == "/profil_config":
-            target = arg or self.manager.get_active_preset_name()
-            if not target:
-                console.print("[yellow]Veuillez spécifier le profil à éditer : /profil_config <nom>[/yellow]")
-            else:
-                self.wizard.run_wizard(target)
+        # /profil [nom] : choisir un profil puis le modifier dans un formulaire
+        elif cmd in ("/profil", "/profile", "/profil_config"):
+            self._cmd_profil(arg)
+            return True
+
+        # /wizard : ancien assistant question par question
+        elif cmd == "/wizard":
+            self.wizard.run_wizard(arg or None)
             return True
 
         # /profil_config_env <nom>
@@ -1018,6 +1076,15 @@ class IADroidCLI:
                 console.print("[yellow]Aucun profil actif.[/yellow]")
             else:
                 parts = arg.split()
+                if not parts:
+                    hw = (self.manager.get_active_preset() or {}).get("hardware", {})
+                    pick = menus.select("Calcul du modèle", [
+                        ("gpu", "GPU", f"Vulkan · {get_gpu_type()}"),
+                        ("cpu", "CPU", "souvent plus rapide sur Adreno, surtout en Q4_0"),
+                    ], current=hw.get("device", "gpu"))
+                    parts = [pick] if pick else []
+                    if not pick:
+                        return True
                 mode = parts[0].lower() if parts else ""
                 if mode not in ("gpu", "cpu"):
                     console.print("[yellow]Usage : /device <gpu|cpu> [ngl][/yellow]")
@@ -1060,6 +1127,16 @@ class IADroidCLI:
 
         # /mtp <auto|on|off> : décodage spéculatif par les couches MTP du modèle
         elif cmd == "/mtp":
+            if not arg:
+                preset = self.manager.get_active_preset() or {}
+                if preset and gguf_has_mtp(preset.get("model_path") or ""):
+                    arg = menus.select("Décodage spéculatif MTP", [
+                        ("auto", "auto", "actif en mode CPU seulement (recommandé)"),
+                        ("on", "on", "toujours (lent en GPU)"),
+                        ("off", "off", "jamais"),
+                    ], current=preset.get("hardware", {}).get("speculative", "auto")) or ""
+                    if not arg:
+                        return True
             self._cmd_mtp(arg)
             return True
 
@@ -1073,14 +1150,8 @@ class IADroidCLI:
             active_name = self.manager.get_active_preset_name()
             if not active_name:
                 console.print("[yellow]Aucun profil actif.[/yellow]")
-            elif not arg:
-                preset = self.manager.get_active_preset()
-                rs = preset.get("reasoning", {}) if preset else {}
-                curr = rs.get("effort", "medium") if rs.get("enabled", True) else "off"
-                console.print(f"[cyan]Niveau d'effort de réflexion actuel : [bold]{curr}[/bold][/cyan]")
-                console.print("[dim]Usage : /effort <minimal|low|medium|high|xhigh|off>[/dim]")
             else:
-                self.manager.set_reasoning_effort(active_name, arg.lower())
+                self._cmd_effort(active_name, arg)
             return True
 
         # /think <on|off>
@@ -1097,10 +1168,19 @@ class IADroidCLI:
                 console.print("[dim]Usage : /think <on|off>[/dim]")
             else:
                 opt = arg.lower()
-                if opt in ("on", "true", "1", "oui"):
+                caps = reasoning_caps((self.manager.get_active_preset() or {}).get("model_path") or "")
+                if not caps["thinking"]:
+                    console.print("[yellow]Ce modèle ne réfléchit pas (son template n'a pas de mode réflexion) : "
+                                  "/think est sans effet.[/yellow]")
+                elif opt in ("on", "true", "1", "oui"):
+                    self._session_effort = None
                     self.manager.set_reasoning_effort(active_name, "medium")
                 elif opt in ("off", "false", "0", "non"):
-                    self.manager.set_reasoning_effort(active_name, "off")
+                    if not caps["toggle"]:
+                        console.print("[yellow]Ce modèle ne sait pas désactiver sa réflexion.[/yellow]")
+                    else:
+                        self._session_effort = None
+                        self.manager.set_reasoning_effort(active_name, "off")
                 else:
                     console.print("[yellow]Usage : /think <on|off>[/yellow]")
             return True
@@ -1140,9 +1220,8 @@ class IADroidCLI:
 
         # /load ou /select : Charger un profil en mémoire VRAM/RAM avec llama-server
         elif cmd in ("/load", "/select", "/start"):
-            target = arg or self.manager.get_active_preset_name()
+            target = arg or pick_preset(self.manager, "Charger un profil")
             if not target:
-                console.print("[yellow]Veuillez spécifier le profil à charger : /load <nom>[/yellow]")
                 return True
             
             if not self.manager.preset_exists(target):
@@ -1150,6 +1229,7 @@ class IADroidCLI:
                 return True
 
             self.manager.set_active_preset_name(target)
+            self._session_effort = None
             self.reset_conversation()
             preset = self.manager.get_active_preset()
 
@@ -1190,10 +1270,10 @@ class IADroidCLI:
 
         # /use <nom>
         elif cmd == "/use":
-            if not arg:
-                console.print("[yellow]Usage : /use <nom_du_profil>[/yellow]")
-            else:
+            arg = arg or pick_preset(self.manager, "Profil actif") or ""
+            if arg:
                 if self.manager.set_active_preset_name(arg):
+                    self._session_effort = None
                     self.reset_conversation()
                     console.print(f"[bold {ANDROID_GREEN}]✓ Profil actif défini sur '{arg}' (contexte réinitialisé).[/bold {ANDROID_GREEN}]")
             return True
@@ -1243,6 +1323,13 @@ class IADroidCLI:
             return True
 
         elif cmd in ("/permissions", "/perm"):
+            if not arg:
+                arg = menus.select("Permissions de l'agent", [
+                    ("ask", "ask", "confirmation avant chaque écriture ou commande"),
+                    ("auto", "auto", "sans confirmation dans les dossiers autorisés"),
+                ], current=self.agent.settings["mode"]) or ""
+                if not arg:
+                    return True
             self._cmd_permissions(arg)
             return True
 
@@ -1265,6 +1352,72 @@ class IADroidCLI:
             return True
 
     # ------------------------------------------------------------------ mode agent : commandes
+
+    def _cmd_profil(self, arg: str):
+        """/profil [nom] : formulaire du profil choisi (« __new__ » : nouveau profil)."""
+        target = arg.strip()
+        if target and target != "__new__" and not self.manager.preset_exists(target):
+            console.print(f"[red]Le profil '{escape(target)}' n'existe pas.[/red]")
+            return
+        if not target:
+            target = pick_preset(self.manager, "Modifier un profil", allow_new=True)
+            if not target:
+                return
+        active_before = self.manager.get_active_preset_name()
+        if target == "__new__":
+            saved = edit_preset(self.manager)
+            if saved and (not active_before or menus.confirm(f"Utiliser « {saved} » comme profil actif ?")):
+                self.manager.set_active_preset_name(saved)
+                self._session_effort = None
+                self.reset_conversation()
+                console.print(f"[bold {ANDROID_GREEN}]✓ Profil actif : {escape(saved)} · /load pour le charger.[/bold {ANDROID_GREEN}]")
+            return
+        saved = edit_preset(self.manager, target)
+        if saved is None:
+            return
+        if saved == self.manager.get_active_preset_name():
+            # Nouveau profil système, modèle, effort… : repartir d'un prompt système à jour
+            self._session_system = None
+            self._session_effort = None
+            if self.server.is_ready() and menus.confirm("Recharger le modèle avec ces réglages ?"):
+                self.reset_conversation()
+                self._start_server_live(self.manager.get_active_preset())
+                self._last_status_check = 0.0
+
+    def _cmd_effort(self, active_name: str, arg: str):
+        """/effort [niveau] : curseur ←/→ (s = pour cette session seulement) ou niveau direct."""
+        preset = self.manager.get_active_preset() or {}
+        model = preset.get("model_path") or ""
+        caps = reasoning_caps(model)
+        if not caps["thinking"]:
+            console.print("[yellow]Ce modèle ne réfléchit pas (pas de mode réflexion dans son template) : "
+                          "l'effort est sans effet.[/yellow]")
+            return
+        levels = [l for l in EFFORT_LEVELS if l != "off" or caps["toggle"]]
+        current, _c, _caps, _s = self._effort_state(preset)
+        if arg:
+            level = arg.lower().split()[0]
+            if level not in levels:
+                console.print(f"[yellow]Usage : /effort <{'|'.join(levels)}>[/yellow]")
+                return
+            self._session_effort = None
+            self.manager.set_reasoning_effort(active_name, level)
+            console.print(f"[dim]{escape(effort_note(model, level))}[/dim]")
+            return
+        how = ("niveaux natifs du modèle" if caps["effort"]
+               else "le modèle n'a pas de niveaux natifs : l'effort limite le nombre de tokens de réflexion")
+        res = menus.slider("Effort de réflexion", levels, current, left="Rapide", right="Réfléchi",
+                           notes={l: effort_note(model, l) for l in levels}, session=True, subtitle=how)
+        if not res:
+            return
+        level, session_only = res
+        if session_only:
+            self._session_effort = level
+            console.print(f"[cyan]Effort : [bold]{level}[/bold] pour cette session[/cyan] "
+                          f"[dim]({escape(effort_note(model, level))})[/dim]")
+        else:
+            self._session_effort = None
+            self.manager.set_reasoning_effort(active_name, level)
 
     def _cmd_agent(self, arg: str):
         """/agent [on|off|web on|off|steps N] : état et réglages du mode agent."""
@@ -1645,7 +1798,7 @@ class IADroidCLI:
         model_path = preset.get("model_path")
         if not model_path or not os.path.exists(model_path):
             console.print(f"[red]Fichier modèle introuvable : {model_path}[/red]")
-            console.print("[yellow]Vérifiez le chemin avec /profil_config.[/yellow]")
+            console.print("[yellow]Vérifiez le chemin avec /profil.[/yellow]")
             return
 
         # Si le serveur n'est pas encore prêt, le démarrer automatiquement
@@ -1807,8 +1960,12 @@ class IADroidCLI:
         Retourne (texte_de_réponse, appels_d_outils). Les exceptions remontent à l'appelant.
         """
         rs = preset.get("reasoning", {})
-        thinking_enabled = rs.get("enabled", True) and rs.get("effort", "medium") != "off"
-        effort = rs.get("effort", "medium") if thinking_enabled else "off"
+        effort, _c, caps, _s = self._effort_state(preset)
+        # Modèle sans réflexion : rien à activer. Sinon, l'effort se traduit en budget de tokens de
+        # réflexion (les templates testés ignorent reasoning_effort, voir config.reasoning_caps)
+        thinking_enabled = effort not in (None, "off")
+        effort = effort or "off"
+        thinking_budget = REASONING_TOKEN_BUDGETS.get(effort) if thinking_enabled else None
         show_thinking = rs.get("show_thinking", True)
 
         # Zone dynamique en bas d'écran : indicateur + réponse en cours + barre d'état en direct
@@ -1924,6 +2081,8 @@ class IADroidCLI:
                 on_token=on_raw_token,
                 reasoning_effort=effort,
                 thinking_enabled=thinking_enabled,
+                thinking_budget=thinking_budget,
+                native_effort=caps["effort"],
                 tools=tools,
                 on_tool_progress=on_tool_progress if tools else None
             )
@@ -2001,6 +2160,7 @@ class IADroidCLI:
                     # Valeurs fraîches à chaque nouvelle invite
                     self._ram_snapshot = get_ram_info()
                     self._last_status_check = 0.0
+                    self._hw_snapshot = None
 
                     # Pas de refresh_interval : le redessin périodique empêchait de
                     # remonter dans l'historique (Termux redescend à chaque rendu).

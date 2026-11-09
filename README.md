@@ -49,7 +49,7 @@
 * 💭 **Gestion Avancée du Raisonnement (Thinking) :** Prise en charge native des modèles de réflexion (DeepSeek R1, Qwen 2.5, Gemma, etc.) avec streaming en direct, fenêtre glissante de 5 mots (`/show-think on`), ou masquage discret (`/show-think off`).
 * ⚡ **Diffusion en Streaming Token-par-Token :** Affichage de la réponse en direct via l'API locale OpenAI `/v1/chat/completions` avec gestion hybride de `reasoning_content` et `content`.
 * 📊 **Barre d'État Inférieure Dynamique :** Affichage en temps réel de la vitesse en `t/s`, du ratio de contexte tokens utilisé, de la RAM système disponible/occupée et du statut du serveur (`● Prêt (VRAM)`, `⏳ Chargement...`, `○ Arrêté`).
-* 📁 **Gestionnaire de Profils (Presets) :** Créez, configurez et basculez entre plusieurs modèles GGUF en un éclair (`/create-preset`, `/load`, `/profil_config`).
+* 📁 **Gestionnaire de Profils (Presets) :** Créez, configurez et basculez entre plusieurs modèles GGUF en un éclair (`/create-preset`, `/load`, `/profil`), avec des formulaires et des menus au clavier.
 * 🛑 **Contrôle Total de la Mémoire :** Démarrage transparent de `llama-server` en arrière-plan et libération instantanée de la RAM et de la VRAM (`/stop`).
 * 🤖 **Mode Agent :** L'IA lit et modifie vos fichiers, lance des commandes Termux (sortie en direct, arrière-plan pour les commandes longues), cherche sur le web et se souvient de vous, avec confirmation de chaque action sensible (`/agent on`).
 * ❗ **Commandes Directes `!` :** Lancez un script depuis la barre de prompt (`!python test.py`) ; sa sortie est transmise à l'IA avec votre message suivant.
@@ -125,22 +125,22 @@ Vous arrivez sur l'interface épurée avec la mascotte Bugdroid, la ligne de sai
 
 | Commande | Arguments | Description |
 | :--- | :--- | :--- |
-| **`/load`** | `<nom>` | Sélectionne un profil et le charge immédiatement en RAM/VRAM pour converser. |
+| **`/load`** | `[nom]` | Charge un profil en RAM/VRAM pour converser. Sans nom : menu de choix. |
 | **`/run`** | | Démarre le serveur local du profil actif en arrière-plan. |
 | **`/stop`** *(ou `/kill`)* | | Arrête le serveur `llama-server` actif et libère instantanément la RAM et la VRAM GPU. |
 | **`/think`** | `<on\|off>` | Active ou désactive rapidement le mode réflexion (Thinking). |
 | **`/show-think`** | `<on\|off>` | Aperçu de la réflexion (ON : 5 mots en direct, OFF : indicateur masqué). |
-| **`/effort`** | `<level>` | Règle l'effort de réflexion (`minimal`, `low`, `medium`, `high`, `xhigh`, `off`). |
-| **`/device`** | `<gpu\|cpu> [ngl]` | Bascule le calcul entre GPU Vulkan et CPU ARM64 (avec couches `-ngl` optionnelles). |
+| **`/effort`** | `[niveau]` | Effort de réflexion. Sans argument : curseur `←/→`, `Entrée` pour enregistrer dans le profil, `s` pour cette session seulement. Les niveaux absents du modèle ne sont pas proposés. |
+| **`/device`** | `[gpu\|cpu] [ngl]` | Bascule le calcul entre GPU Vulkan et CPU ARM64 (avec couches `-ngl` optionnelles). |
 | **`/fa`** | `<on\|off>` | Active ou désactive Flash Attention (`-fa`) pour le profil en cours. |
-| **`/mtp`** | `<auto\|on\|off>` | Décodage spéculatif MTP : les modèles qui embarquent des couches MTP (ex. Qwen3.5) prédisent plusieurs tokens à la fois, soit +10 à +35 % de vitesse de génération en CPU. `auto` l'active en mode CPU uniquement. |
+| **`/mtp`** | `[auto\|on\|off]` | Décodage spéculatif MTP : les modèles qui embarquent des couches MTP (ex. Qwen3.5) prédisent plusieurs tokens à la fois, soit +10 à +35 % de vitesse de génération en CPU. `auto` l'active en mode CPU uniquement. |
 | **`/quantize`** | `[Q4_0\|Q8_0\|…]` | Convertit le modèle du profil actif (Q4_0 par défaut) dans `~/.iadroid/models` et propose de l'utiliser dans le profil. |
 | **`/presets`** | | Affiche le tableau récapitulatif de tous les profils enregistrés. |
-| **`/create-preset`** | | Assistant interactif pas à pas pour configurer un nouveau modèle GGUF. |
-| **`/profil_config`** | `<nom>` | Ouvre l'assistant pré-rempli pour éditer un profil existant. |
+| **`/create-preset`** | | Formulaire de nouveau profil : nom, description, modèle (liste des GGUF trouvés), matériel, contexte, réflexion, échantillonnage. |
+| **`/profil`** | `[nom]` | Choisit un profil puis ouvre son formulaire (renommer, modifier, supprimer). Remplace `/profil_config`. |
 | **`/profil_config_env`** | `<nom>` | Affiche le contenu JSON brut du profil avec coloration syntaxique. |
 | **`/profil_Prompt_Systeme`** | `<nom>` | Affiche et permet d'éditer directement le prompt système du modèle. |
-| **`/use`** | `<nom>` | Définit le profil actif par défaut sans le démarrer immédiatement. |
+| **`/use`** | `[nom]` | Définit le profil actif par défaut sans le démarrer immédiatement. |
 | **`/reset`** | | Réinitialise l'historique et le contexte de la conversation en cours. |
 | **`/check-gpu`** | | Diagnostic GPU Vulkan (Adreno / Mali) et liaison du pilote Android dans Termux. |
 | **`/boost-gpu`** | | Forcer la fréquence GPU maximale (1 000 MHz sur Adreno 750) et optimiser Turnip. |
@@ -152,7 +152,7 @@ Vous arrivez sur l'interface épurée avec la mascotte Bugdroid, la ligne de sai
 | **`/llama-cli`** | | Lance une session brute interactive avec `llama-cli` (mode expert / débug). |
 | **`/agent`** | `<on\|off>` | Mode agent : l'IA peut lire, écrire et modifier des fichiers, lancer des commandes Termux et consulter le web (`/agent web on\|off`, `/agent steps N`). |
 | **`/allow`** | `[chemin\|all\|remove <chemin>]` | Dossiers autorisés pour l'agent, en plus de `~/.iadroid/workspace`. `all` autorise Termux et `/storage/emulated/0`. |
-| **`/permissions`** | `<ask\|auto>` | `ask` : confirmation avant chaque écriture ou commande. `auto` : tout est autorisé dans les dossiers autorisés. |
+| **`/permissions`** | `[ask\|auto]` | `ask` : confirmation avant chaque écriture ou commande. `auto` : tout est autorisé dans les dossiers autorisés. |
 | **`/memory`** | `[del <nom>\|clear]` | Affiche ou supprime les notes que l'IA garde sur vous d'une conversation à l'autre. |
 | **`/jobs`** | `[kill <id>\|kill all]` | Commandes que l'agent a lancées en arrière-plan : état, dernières lignes de sortie, arrêt. L'agent y passe une commande longue (`pkg upgrade`, compilation…) au lieu de bloquer, et une pastille ◐ l'indique dans la barre d'état. |
 | **`!`** | `<commande>` | Lance une commande ou un script directement dans le terminal (ex. `!python test.py`, `!cd projet`). L'affichage et le clavier sont ceux du script ; Ctrl+C n'arrête que lui. La sortie est jointe à votre prochain message pour que l'IA puisse s'en servir. |
@@ -175,7 +175,7 @@ IADroid intègre un parseur de flux streaming dédié ([`ThinkStreamParser`](iad
 * **`/show-think off`** : Affiche uniquement l'indicateur discret `💭 Réflexion en cours...` sans afficher de texte défilant, suivi du récapitulatif `💭 Réfléchi en Xs` une fois la réflexion achevée.
 
 ### 3. Niveaux d'effort (`/effort`)
-Réglez le niveau de raisonnement via `/effort <minimal|low|medium|high|xhigh|off>`. Chaque niveau ajuste le budget indicatif de tokens alloués à la réflexion.
+Réglez le niveau de raisonnement avec `/effort` (curseur) ou `/effort <minimal|low|medium|high|xhigh|off>`. IADroid lit le template du modèle dans le fichier GGUF : si le modèle a des niveaux natifs (`reasoning_effort`), ils lui sont transmis ; sinon, chaque niveau limite le nombre de tokens de réflexion (256 à 4096). Un modèle sans mode réflexion affiche « ○ sans réflexion » et `/effort` n'a pas d'effet.
 
 ---
 
@@ -311,7 +311,9 @@ IADroid s'appuie sur une architecture **Client ↔ Serveur local** via `llama-se
 │   ├── server.py             # Moteur llama-server en arrière-plan & client SSE
 │   ├── updater.py            # Système de mise à jour automatique via GitHub (/update)
 │   ├── version.py            # Numéro de version officiel d'IADroid
-│   └── wizard.py             # Assistant interactif (/create-preset, /profil_config)
+│   ├── menus.py              # Menus au clavier (curseur, listes, formulaires)
+│   ├── preset_form.py        # Formulaire de profil (/create-preset, /profil)
+│   └── wizard.py             # Ancien assistant question par question (/wizard)
 ├── scripts/
 │   ├── build_llama.sh        # Script de compilation autonome llama.cpp
 │   └── check_env.sh          # Script de diagnostic matériel (ARM64, Vulkan, RAM)

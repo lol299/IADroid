@@ -23,7 +23,7 @@ from .config import (
 )
 from .preset_manager import PresetManager
 
-console = Console()
+from .config import console  # console partagée : une seule instance pour que rich.Live gère tous les affichages
 
 class PresetWizard:
     def __init__(self, manager: PresetManager):

@@ -10,7 +10,7 @@ from rich.text import Text
 from .config import ANDROID_GREEN, CYAN, YELLOW
 from .version import __version__
 
-console = Console()
+from .config import console  # console partagée : une seule instance pour que rich.Live gère tous les affichages
 
 # Mascotte Android Pixel complète (Style 8-bit / Invaders)
 MASCOT_PIXEL_FULL = f"""[{ANDROID_GREEN}]
@@ -97,20 +97,20 @@ def print_help_table():
     table.add_column("Arguments", style="yellow")
     table.add_column("Description", style="white")
 
-    table.add_row("/load", "<nom>", "Sélectionner un profil et le charger immédiatement en RAM")
-    table.add_row("/create-preset", "", "Créer un nouveau profil de modèle via l'assistant interactif")
-    table.add_row("/profil_config", "<nom>", "Modifier un profil existant avec le même assistant interactif")
+    table.add_row("/load", "[nom]", "Charger un profil en RAM (sans nom : menu de choix)")
+    table.add_row("/create-preset", "", "Créer un profil dans un formulaire (nom, modèle, matériel, réflexion…)")
+    table.add_row("/profil", "[nom]", "Choisir un profil puis modifier ses réglages dans un formulaire")
     table.add_row("/profil_config_env", "<nom>", "Afficher le fichier brut de configuration du profil")
     table.add_row("/profil_Prompt_Systeme", "<nom>", "Afficher et modifier directement le prompt système du profil")
-    table.add_row("/device", "<gpu|cpu> [ngl]", "Basculer entre GPU (Vulkan) et CPU (avec nb de couches ngl optionnel)")
+    table.add_row("/device", "[gpu|cpu] [ngl]", "Basculer entre GPU (Vulkan) et CPU (avec nb de couches ngl optionnel)")
     table.add_row("/fa", "<on|off>", "Activer ou désactiver Flash Attention (-fa)")
-    table.add_row("/mtp", "<auto|on|off>", "Décodage spéculatif MTP (modèles qui l'embarquent, ex. Qwen3.5) : +10 à +35 % en CPU")
+    table.add_row("/mtp", "[auto|on|off]", "Décodage spéculatif MTP (modèles qui l'embarquent, ex. Qwen3.5) : +10 à +35 % en CPU")
     table.add_row("/quantize", "[Q4_0|Q8_0|…]", "Convertir le modèle du profil (Q4_0 : le plus rapide en mode CPU)")
-    table.add_row("/effort", "<level>", "Régler l'effort de réflexion (minimal|low|medium|high|xhigh|off)")
+    table.add_row("/effort", "[niveau]", "Effort de réflexion : curseur ←/→ (s = cette session seulement)")
     table.add_row("/think", "<on|off>", "Activer ou désactiver rapidement le mode réflexion (Thinking)")
     table.add_row("/show-think", "<on|off>", "Aperçu de la réflexion (ON: 5 mots en direct, OFF: masqué)")
     table.add_row("/presets", "", "Lister tous les profils enregistrés")
-    table.add_row("/use", "<nom>", "Activer un profil spécifique")
+    table.add_row("/use", "[nom]", "Activer un profil sans le charger (sans nom : menu de choix)")
     table.add_row("/reset", "", "Réinitialiser le contexte de la conversation en cours")
     table.add_row("/update", "", "Vérifier et installer les mises à jour d'IADroid depuis GitHub")
     table.add_row("/check-gpu", "", "Diagnostic GPU Vulkan et liaison automatique du pilote Android")
@@ -124,7 +124,7 @@ def print_help_table():
     table.add_row("/llama-cli", "", "Lancer une session brute interactive avec llama-cli (expert débug)")
     table.add_row("/agent", "<on|off>", "Mode agent : l'IA lit/écrit des fichiers, lance des commandes, va sur le web (web on|off, steps N)")
     table.add_row("/allow", "[chemin|all|remove]", "Dossiers autorisés pour l'agent (all : Termux + /storage/emulated/0)")
-    table.add_row("/permissions", "<ask|auto>", "ask : confirmer chaque écriture/commande · auto : tout autoriser")
+    table.add_row("/permissions", "[ask|auto]", "ask : confirmer chaque écriture/commande · auto : tout autoriser")
     table.add_row("/memory", "[del <nom>|clear]", "Notes que l'IA garde sur vous d'une conversation à l'autre")
     table.add_row("/jobs", "[kill <id>|kill all]", "Commandes lancées en arrière-plan par l'agent (sortie, état, arrêt)")
     table.add_row("!", "<commande>", "Lancer une commande ou un script dans le terminal (sortie jointe au prochain message)")

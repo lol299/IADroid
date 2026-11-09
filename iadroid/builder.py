@@ -14,7 +14,7 @@ from rich.prompt import Prompt
 
 from .config import IADROID_HOME, BIN_DIR, LLAMA_CLI_PATH, ANDROID_GREEN, get_gpu_type, ensure_vulkan_link
 
-console = Console()
+from .config import console  # console partagée : une seule instance pour que rich.Live gère tous les affichages
 THREADS_FILE = IADROID_HOME / "compile_threads.txt"
 
 class LlamaBuilder:

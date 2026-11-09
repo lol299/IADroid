@@ -23,7 +23,7 @@ from rich.prompt import Confirm
 from .config import IADROID_HOME, ANDROID_GREEN, CYAN, YELLOW
 from .version import __version__
 
-console = Console()
+from .config import console  # console partagée : une seule instance pour que rich.Live gère tous les affichages
 
 REPO_OWNER = "lol299"
 REPO_NAME = "IADroid"
